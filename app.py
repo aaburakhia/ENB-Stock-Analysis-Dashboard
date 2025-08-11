@@ -12,7 +12,7 @@ from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 
 # --- 1. APP CONFIGURATION ---
 st.set_page_config(
-    page_title="ML Workflow Dashboard",
+    page_title="ENB Stock Analysis Dashboard",
     layout="wide",
     initial_sidebar_state="expanded",
 )
