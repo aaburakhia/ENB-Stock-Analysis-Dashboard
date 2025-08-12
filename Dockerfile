@@ -17,6 +17,7 @@ COPY . .
 # Hugging Face Spaces expects the app to run on this port
 EXPOSE 7860
 
-# Define the command to run your app using gunicorn
-# Gunicorn is a professional-grade web server for Python applications
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:7860", "app:server"]
+# --- THIS IS THE CORRECTED LINE ---
+# Define the command to run the Streamlit app correctly.
+# We use the file name "app.py" here, but if you renamed it to streamlit_app.py, change it below.
+CMD ["streamlit", "run", "app.py", "--server.port=7860", "--server.address=0.0.0.0"]
