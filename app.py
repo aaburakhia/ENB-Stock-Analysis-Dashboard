@@ -1,4 +1,4 @@
-# app.py - The Complete, Professional Streamlit ML Dashboard
+# app.py 
 
 import streamlit as st
 import pandas as pd
@@ -29,7 +29,6 @@ def load_data():
         df = pd.read_csv('ENB_data_advanced_features.csv', index_col='Date', parse_dates=True)
         return df
     except FileNotFoundError:
-        # This error will now be displayed clearly in the UI.
         st.error("CRITICAL ERROR: The dataset file 'ENB_data_advanced_features.csv' was not found.")
         st.error("Please ensure the CSV file is in the root of your Hugging Face Space and has the correct name.")
         return None
@@ -40,10 +39,7 @@ df = load_data()
 st.title("Advanced ML Analysis Cockpit for ENB Stock")
 st.markdown("An interactive dashboard for model comparison, feature analysis, and prediction simulation.")
 
-# --- THIS IS THE ROBUSTNESS FIX ---
 if df is None:
-    # If the data failed to load, display the error and stop the script from running further.
-    # This prevents the "Stopping..." issue and gives a clear error to the user.
     st.stop()
 
 # --- 4. SIDEBAR - CONTROLS ---
@@ -56,10 +52,18 @@ target_col = st.sidebar.selectbox(
     index=list(df.columns).index('Adjusted Close')
 )
 
+# --- THIS IS THE ROBUSTNESS FIX ---
+# Define the features we would ideally like to pre-select.
+desired_default_features = ['MA_20', 'MA_50', 'RSI', 'Volume', 'Volatility_30D']
+# Create the list of available options for the user to choose from.
+available_options = [col for col in df.columns if col != target_col]
+# Create the final default list by only including features that actually exist.
+final_default_features = [feat for feat in desired_default_features if feat in available_options]
+
 feature_cols = st.sidebar.multiselect(
     "Select Features (X)",
-    options=[col for col in df.columns if col != target_col],
-    default=['MA_20', 'MA_50', 'RSI', 'Volume', 'Volatility_30D']
+    options=available_options,
+    default=final_default_features # Use the safe, filtered list
 )
 
 model_name = st.sidebar.selectbox(
@@ -73,12 +77,10 @@ run_experiment_button = st.sidebar.button("Run Experiment", type="primary")
 # --- 5. MAIN CONTENT TABS ---
 tab1, tab2 = st.tabs(["📈 Exploratory Data Analysis (EDA)", "🤖 Model Training & Evaluation"])
 
-# --- EDA TAB ---
 with tab1:
     st.header("Exploratory Data Analysis")
     st.markdown("These charts provide a professional overview of the pre-processed and feature-engineered dataset.")
 
-    # Chart 1 & 2: Professional Price and Volume Chart
     st.subheader("Price and Volume Analysis (Last 2 Years)")
     df_subset = df.last('2Y').copy()
     df_subset['Volume_Color'] = np.where(df_subset['Adjusted Close'] >= df_subset['Open'], 'green', 'red')
@@ -91,7 +93,6 @@ with tab1:
     fig_price_vol.update_yaxes(title_text="Volume", row=2, col=1)
     st.plotly_chart(fig_price_vol, use_container_width=True)
 
-    # Chart 3 & 4: Momentum Indicators (IMPROVED)
     st.subheader("Momentum Indicators (Last 2 Years)")
     fig_momentum = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1)
     fig_momentum.add_trace(go.Scatter(x=df_subset.index, y=df_subset['MACD'], name='MACD', line=dict(color='blue')), row=1, col=1)
@@ -105,12 +106,10 @@ with tab1:
     fig_momentum.update_yaxes(title_text="RSI", row=2, col=1)
     st.plotly_chart(fig_momentum, use_container_width=True)
     
-    # Chart 5: Correlation Heatmap
     st.subheader("Correlation Heatmap")
     corr_fig = px.imshow(df[['Adjusted Close', 'High', 'Low', 'Open', 'Volume', 'MA_20', 'MA_50', 'RSI']].corr(), text_auto=True, template="plotly_white")
     st.plotly_chart(corr_fig, use_container_width=True)
 
-# --- MODEL EVALUATION TAB ---
 with tab2:
     st.header("Model Training Results")
     
@@ -155,7 +154,6 @@ with tab2:
                     importance_fig = px.bar(importance_df, x='importance', y='feature', orientation='h', title='Feature Importance', template="plotly_white")
                     st.plotly_chart(importance_fig, use_container_width=True)
 
-    # --- INTERACTIVE VISUALIZATION: WHAT-IF SIMULATOR ---
     if 'trained_model' in st.session_state:
         st.sidebar.divider()
         st.sidebar.header("What-if Simulator")
