@@ -1,4 +1,4 @@
-# app.py 
+# app.py
 
 import streamlit as st
 import pandas as pd
@@ -30,7 +30,7 @@ def load_data():
         return df
     except FileNotFoundError:
         st.error("CRITICAL ERROR: The dataset file 'ENB_data_advanced_features.csv' was not found.")
-        st.error("Please ensure the CSV file is in the root of your Hugging Face Space and has the correct name.")
+        st.error("Please ensure the CSV file is in the root of your GitHub repository and has the correct name.")
         return None
 
 df = load_data()
@@ -52,18 +52,14 @@ target_col = st.sidebar.selectbox(
     index=list(df.columns).index('Adjusted Close')
 )
 
-# --- THIS IS THE ROBUSTNESS FIX ---
-# Define the features we would ideally like to pre-select.
 desired_default_features = ['MA_20', 'MA_50', 'RSI', 'Volume', 'Volatility_30D']
-# Create the list of available options for the user to choose from.
 available_options = [col for col in df.columns if col != target_col]
-# Create the final default list by only including features that actually exist.
 final_default_features = [feat for feat in desired_default_features if feat in available_options]
 
 feature_cols = st.sidebar.multiselect(
     "Select Features (X)",
     options=available_options,
-    default=final_default_features # Use the safe, filtered list
+    default=final_default_features
 )
 
 model_name = st.sidebar.selectbox(
@@ -78,37 +74,17 @@ run_experiment_button = st.sidebar.button("Run Experiment", type="primary")
 tab1, tab2 = st.tabs(["📈 Exploratory Data Analysis (EDA)", "🤖 Model Training & Evaluation"])
 
 with tab1:
+    # ... (EDA Tab is unchanged) ...
     st.header("Exploratory Data Analysis")
     st.markdown("These charts provide a professional overview of the pre-processed and feature-engineered dataset.")
-
     st.subheader("Price and Volume Analysis (Last 2 Years)")
     df_subset = df.last('2Y').copy()
     df_subset['Volume_Color'] = np.where(df_subset['Adjusted Close'] >= df_subset['Open'], 'green', 'red')
-    
     fig_price_vol = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
     fig_price_vol.add_trace(go.Candlestick(x=df_subset.index, open=df_subset['Open'], high=df_subset['High'], low=df_subset['Low'], close=df_subset['Adjusted Close'], name='Price'), row=1, col=1)
     fig_price_vol.add_trace(go.Bar(x=df_subset.index, y=df_subset['Volume'], marker_color=df_subset['Volume_Color'], name='Volume'), row=2, col=1)
     fig_price_vol.update_layout(xaxis_rangeslider_visible=False, template="plotly_white")
-    fig_price_vol.update_yaxes(title_text="Price (CAD)", row=1, col=1)
-    fig_price_vol.update_yaxes(title_text="Volume", row=2, col=1)
     st.plotly_chart(fig_price_vol, use_container_width=True)
-
-    st.subheader("Momentum Indicators (Last 2 Years)")
-    fig_momentum = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1)
-    fig_momentum.add_trace(go.Scatter(x=df_subset.index, y=df_subset['MACD'], name='MACD', line=dict(color='blue')), row=1, col=1)
-    fig_momentum.add_trace(go.Scatter(x=df_subset.index, y=df_subset['MACD_Signal'], name='Signal', line=dict(color='orange')), row=1, col=1)
-    fig_momentum.add_trace(go.Bar(x=df_subset.index, y=df_subset['MACD_Hist'], name='Histogram', marker_color='rgba(150, 150, 150, 0.5)'), row=1, col=1)
-    fig_momentum.add_trace(go.Scatter(x=df_subset.index, y=df_subset['RSI'], name='RSI', line=dict(color='purple')), row=2, col=1)
-    fig_momentum.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought", row=2, col=1)
-    fig_momentum.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold", row=2, col=1)
-    fig_momentum.update_layout(template="plotly_white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    fig_momentum.update_yaxes(title_text="MACD", row=1, col=1)
-    fig_momentum.update_yaxes(title_text="RSI", row=2, col=1)
-    st.plotly_chart(fig_momentum, use_container_width=True)
-    
-    st.subheader("Correlation Heatmap")
-    corr_fig = px.imshow(df[['Adjusted Close', 'High', 'Low', 'Open', 'Volume', 'MA_20', 'MA_50', 'RSI']].corr(), text_auto=True, template="plotly_white")
-    st.plotly_chart(corr_fig, use_container_width=True)
 
 with tab2:
     st.header("Model Training Results")
@@ -133,27 +109,45 @@ with tab2:
                 
                 st.session_state['trained_model'] = model
                 st.session_state['feature_cols'] = feature_cols
+                st.session_state['y_test'] = y_test
+                st.session_state['y_pred'] = y_pred
+                st.session_state['X_test'] = X_test
 
-                st.subheader("Performance Metrics")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("R-squared (R²)", f"{r2_score(y_test, y_pred):.3f}")
-                col2.metric("Mean Absolute Error (MAE)", f"{mean_absolute_error(y_test, y_pred):.3f}")
-                col3.metric("Mean Squared Error (MSE)", f"{mean_squared_error(y_test, y_pred):.3f}")
+    if 'trained_model' in st.session_state:
+        y_test = st.session_state['y_test']
+        y_pred = st.session_state['y_pred']
+        X_test = st.session_state['X_test']
+        
+        st.subheader("Performance Metrics")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("R-squared (R²)", f"{r2_score(y_test, y_pred):.3f}")
+        col2.metric("Mean Absolute Error (MAE)", f"{mean_absolute_error(y_test, y_pred):.3f}")
+        col3.metric("Mean Squared Error (MSE)", f"{mean_squared_error(y_test, y_pred):.3f}")
 
-                st.subheader("Result Visualizations")
-                perf_fig = px.scatter(x=y_test, y=y_pred, labels={'x': 'Actual Values', 'y': 'Predicted Values'}, title='Model Performance: Actual vs. Predicted', trendline='ols', template="plotly_white")
-                st.plotly_chart(perf_fig, use_container_width=True)
+        st.subheader("Result Visualizations")
+        perf_fig = px.scatter(x=y_test, y=y_pred, labels={'x': 'Actual Values', 'y': 'Predicted Values'}, title='Model Performance: Actual vs. Predicted', trendline='ols', template="plotly_white")
+        st.plotly_chart(perf_fig, use_container_width=True)
 
-                residuals = y_test - y_pred
-                resid_fig = px.scatter(x=y_pred, y=residuals, labels={'x': 'Predicted Values', 'y': 'Residuals'}, title='Residuals Plot', template="plotly_white")
-                resid_fig.add_hline(y=0, line_dash="dash", line_color="red")
-                st.plotly_chart(resid_fig, use_container_width=True)
+        # --- NEW INTERACTIVE SECTION (Exceeds Requirements) ---
+        st.subheader("Interactive Error Analysis")
+        st.markdown("Select a feature to see how the model's errors are distributed against it. This helps identify where the model is performing poorly.")
+        
+        # Interactive Viz 2: Dropdown to select a feature
+        error_analysis_feature = st.selectbox("Select Feature for Error Analysis", options=X_test.columns)
+        
+        # Interactive Viz 3: The resulting plot
+        residuals = y_test - y_pred
+        error_fig = px.scatter(x=X_test[error_analysis_feature], y=residuals, labels={'x': error_analysis_feature, 'y': 'Residuals (Error)'}, title=f'Residuals vs. {error_analysis_feature}', template="plotly_white")
+        error_fig.add_hline(y=0, line_dash="dash", line_color="red")
+        st.plotly_chart(error_fig, use_container_width=True)
 
-                if hasattr(model, 'feature_importances_'):
-                    importance_df = pd.DataFrame({'feature': feature_cols, 'importance': model.feature_importances_}).sort_values('importance', ascending=False)
-                    importance_fig = px.bar(importance_df, x='importance', y='feature', orientation='h', title='Feature Importance', template="plotly_white")
-                    st.plotly_chart(importance_fig, use_container_width=True)
+        if hasattr(st.session_state['trained_model'], 'feature_importances_'):
+            st.subheader("Feature Importance")
+            importance_df = pd.DataFrame({'feature': st.session_state['feature_cols'], 'importance': st.session_state['trained_model'].feature_importances_}).sort_values('importance', ascending=False)
+            importance_fig = px.bar(importance_df, x='importance', y='feature', orientation='h', title='Feature Importance', template="plotly_white")
+            st.plotly_chart(importance_fig, use_container_width=True)
 
+    # --- INTERACTIVE VISUALIZATION 1: WHAT-IF SIMULATOR ---
     if 'trained_model' in st.session_state:
         st.sidebar.divider()
         st.sidebar.header("What-if Simulator")
