@@ -12,7 +12,7 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score, roc_auc_score, roc_curve
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score, roc_auc_score, roc_curve, precision_score, recall_score
 from imblearn.over_sampling import SMOTE
 import optuna
 from datetime import datetime
@@ -131,8 +131,13 @@ def train_model(X_train, X_test, y_train, y_test, model_name, model, use_smote=T
     """Train a single model and return results"""
     try:
         if use_smote and len(np.unique(y_train)) > 1:
-            smote = SMOTE(random_state=42)
-            X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+            try:
+                smote = SMOTE(random_state=42)
+                X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+            except Exception as e:
+                # If SMOTE fails, use original data
+                st.warning(f"SMOTE failed for {model_name}, using original data: {str(e)}")
+                X_train_res, y_train_res = X_train, y_train
         else:
             X_train_res, y_train_res = X_train, y_train
         
@@ -146,6 +151,8 @@ def train_model(X_train, X_test, y_train, y_test, model_name, model, use_smote=T
         # Metrics
         accuracy = accuracy_score(y_test, y_pred)
         f1 = f1_score(y_test, y_pred, zero_division=0)
+        precision = precision_score(y_test, y_pred, zero_division=0)
+        recall = recall_score(y_test, y_pred, zero_division=0)
         auc = roc_auc_score(y_test, y_pred_proba) if y_pred_proba is not None else None
         
         return {
@@ -155,6 +162,8 @@ def train_model(X_train, X_test, y_train, y_test, model_name, model, use_smote=T
             'probabilities': y_pred_proba,
             'accuracy': accuracy,
             'f1_score': f1,
+            'precision': precision,
+            'recall': recall,
             'auc_score': auc,
             'confusion_matrix': confusion_matrix(y_test, y_pred),
             'classification_report': classification_report(y_test, y_pred, output_dict=True, zero_division=0)
@@ -163,7 +172,7 @@ def train_model(X_train, X_test, y_train, y_test, model_name, model, use_smote=T
         st.error(f"Error training {model_name}: {str(e)}")
         return None
 
-def run_automl_optimization(X_train, X_test, y_train, y_test, model_type, n_trials=50):
+def run_automl_optimization(X_train, X_test, y_train, y_test, model_type, metric='f1', n_trials=50):
     """Run AutoML optimization using Optuna"""
     
     def objective(trial):
@@ -199,33 +208,53 @@ def run_automl_optimization(X_train, X_test, y_train, y_test, model_type, n_tria
             
             # Use SMOTE if classes are balanced
             if len(np.unique(y_train)) > 1:
-                smote = SMOTE(random_state=42)
-                X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+                try:
+                    smote = SMOTE(random_state=42)
+                    X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+                except Exception:
+                    # If SMOTE fails, use original data
+                    X_train_res, y_train_res = X_train, y_train
             else:
                 X_train_res, y_train_res = X_train, y_train
             
             model.fit(X_train_res, y_train_res)
             y_pred = model.predict(X_test)
-            return f1_score(y_test, y_pred, zero_division=0)
-        except Exception:
+            
+            # Return the specified metric
+            if metric == 'f1':
+                return f1_score(y_test, y_pred, zero_division=0)
+            elif metric == 'precision':
+                return precision_score(y_test, y_pred, zero_division=0)
+            elif metric == 'recall':
+                return recall_score(y_test, y_pred, zero_division=0)
+            else:
+                return accuracy_score(y_test, y_pred)
+                
+        except Exception as e:
             return 0.0
     
-    study = optuna.create_study(direction='maximize', verbosity=0)
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-    
-    # Train best model
-    best_params = study.best_params
-    
-    if model_type == "Random Forest":
-        best_model = RandomForestClassifier(**best_params, random_state=42)
-    elif model_type == "Gradient Boosting":
-        best_model = GradientBoostingClassifier(**best_params, random_state=42)
-    elif model_type == "SVM":
-        best_model = SVC(**best_params, probability=True, random_state=42)
-    else:
-        best_model = LogisticRegression(**best_params, random_state=42, max_iter=1000)
-    
-    return train_model(X_train, X_test, y_train, y_test, f"{model_type} (AutoML)", best_model)
+    try:
+        study = optuna.create_study(direction='maximize', verbosity=0)
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+        
+        # Train best model
+        best_params = study.best_params
+        
+        if model_type == "Random Forest":
+            best_model = RandomForestClassifier(**best_params, random_state=42)
+        elif model_type == "Gradient Boosting":
+            best_model = GradientBoostingClassifier(**best_params, random_state=42)
+        elif model_type == "SVM":
+            best_model = SVC(**best_params, probability=True, random_state=42)
+        else:
+            best_model = LogisticRegression(**best_params, random_state=42, max_iter=1000)
+        
+        result = train_model(X_train, X_test, y_train, y_test, f"{model_type} (AutoML-{metric.upper()})", best_model)
+        return result
+        
+    except Exception as e:
+        st.error(f"AutoML optimization failed: {str(e)}")
+        return None
 
 def create_roc_curve(model_results):
     """Create ROC curve for multiple models"""
@@ -411,6 +440,11 @@ with tab2:
                 "Model for AutoML",
                 ["Random Forest", "Gradient Boosting", "SVM", "Logistic Regression"]
             )
+            automl_metric = st.selectbox(
+                "Optimization Metric",
+                ["f1", "precision", "recall", "accuracy"],
+                help="Metric to optimize during AutoML hyperparameter search"
+            )
         
         # Training options
         use_smote = st.checkbox("Use SMOTE for Class Balancing", value=True)
@@ -456,24 +490,29 @@ with tab2:
             
             # Train AutoML model if selected
             if use_automl:
-                status_text.text(f"Running AutoML optimization for {automl_model}...")
-                automl_result = run_automl_optimization(X_train_scaled, X_test_scaled, y_train, y_test, automl_model, n_trials)
+                status_text.text(f"Running AutoML optimization for {automl_model} (optimizing {automl_metric.upper()})...")
+                automl_result = run_automl_optimization(X_train_scaled, X_test_scaled, y_train, y_test, automl_model, automl_metric, n_trials)
                 if automl_result:  # Only add if training was successful
-                    st.session_state.model_results[f"{automl_model} (AutoML)"] = automl_result
+                    st.session_state.model_results[f"{automl_model} (AutoML-{automl_metric.upper()})"] = automl_result
                 progress_bar.progress(1.0)
             
             status_text.text("Training completed!")
             
             # Display quick results
             st.subheader("Quick Results")
-            results_df = pd.DataFrame({
-                'Model': [result['name'] for result in st.session_state.model_results.values()],
-                'Accuracy': [f"{result['accuracy']:.3f}" for result in st.session_state.model_results.values()],
-                'F1-Score': [f"{result['f1_score']:.3f}" for result in st.session_state.model_results.values()],
-                'AUC': [f"{result['auc_score']:.3f}" if result['auc_score'] else "N/A" for result in st.session_state.model_results.values()]
-            })
-            
-            st.dataframe(results_df, use_container_width=True)
+            if st.session_state.model_results:
+                results_df = pd.DataFrame({
+                    'Model': [result['name'] for result in st.session_state.model_results.values()],
+                    'Accuracy': [f"{result['accuracy']:.3f}" for result in st.session_state.model_results.values()],
+                    'F1-Score': [f"{result['f1_score']:.3f}" for result in st.session_state.model_results.values()],
+                    'Precision': [f"{result['precision']:.3f}" for result in st.session_state.model_results.values()],
+                    'Recall': [f"{result['recall']:.3f}" for result in st.session_state.model_results.values()],
+                    'AUC': [f"{result['auc_score']:.3f}" if result['auc_score'] else "N/A" for result in st.session_state.model_results.values()]
+                })
+                
+                st.dataframe(results_df, use_container_width=True)
+            else:
+                st.info("No models were successfully trained. Please check your data and try again.")
         
         elif not st.session_state.models_trained:
             st.info("👈 Configure your models and click 'Train Models' to see results here.")
@@ -492,15 +531,15 @@ with tab3:
         # Best model metrics
         best_f1 = max(st.session_state.model_results.values(), key=lambda x: x['f1_score'])
         best_acc = max(st.session_state.model_results.values(), key=lambda x: x['accuracy'])
-        best_auc = max([r for r in st.session_state.model_results.values() if r['auc_score']], 
-                       key=lambda x: x['auc_score'], default=best_f1)
+        best_precision = max(st.session_state.model_results.values(), key=lambda x: x['precision'])
+        best_recall = max(st.session_state.model_results.values(), key=lambda x: x['recall'])
         
         with col1:
             st.metric("🎯 Best F1-Score", f"{best_f1['f1_score']:.3f}", best_f1['name'])
         with col2:
-            st.metric("🎯 Best Accuracy", f"{best_acc['accuracy']:.3f}", best_acc['name'])
+            st.metric("🎯 Best Precision", f"{best_precision['precision']:.3f}", best_precision['name'])
         with col3:
-            st.metric("🎯 Best AUC", f"{best_auc['auc_score']:.3f}" if best_auc['auc_score'] else "N/A", best_auc['name'])
+            st.metric("🎯 Best Recall", f"{best_recall['recall']:.3f}", best_recall['name'])
         with col4:
             st.metric("📊 Models Trained", len(st.session_state.model_results), "")
         
@@ -518,14 +557,14 @@ with tab3:
                 st.info("ROC curves require models with probability predictions.")
         
         with col2:
-            # Metrics comparison
             metrics_data = []
             for result in st.session_state.model_results.values():
                 metrics_data.append({
                     'Model': result['name'],
                     'Accuracy': result['accuracy'],
                     'F1-Score': result['f1_score'],
-                    'AUC': result['auc_score'] or 0
+                    'Precision': result['precision'],
+                    'Recall': result['recall']
                 })
             
             metrics_df = pd.DataFrame(metrics_data)
