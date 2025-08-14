@@ -465,12 +465,51 @@ with st.sidebar:
     st.title("🎛️ Control Panel")
     st.markdown("---")
     
-    # Data loading status
-    if st.button("🔄 Reload Data", type="primary"):
-        st.session_state.data = None
-        st.session_state.models_trained = False
-        st.session_state.model_results = {}
-        st.rerun()
+    # Tool Description
+    st.subheader("📈 About This Tool")
+    st.markdown("""
+    **Stock Market Prediction Dashboard** helps you build and compare machine learning models for predicting stock price movements.
+    
+    🔄 **Process:** Upload data → Explore features → Train models → Analyze performance
+    """)
+    
+    st.markdown("---")
+    
+    # Use Cases
+    st.subheader("💼 Key Use Cases")
+    
+    with st.expander("🛡️ Conservative Investor", expanded=True):
+        st.markdown("""
+        **Focus: High Precision**
+        
+        • Minimize false positives (avoid bad investments)
+        • Prefer models with 80%+ precision
+        • Better to miss opportunities than lose money
+        • Use SVM or Logistic Regression for interpretability
+        """)
+    
+    with st.expander("🚀 Growth Investor"):
+        st.markdown("""
+        **Focus: High Recall**
+        
+        • Capture most growth opportunities
+        • Don't mind some false positives
+        • Prefer models with 75%+ recall
+        • Use Random Forest or Gradient Boosting
+        """)
+    
+    with st.expander("⚖️ Balanced Trader"):
+        st.markdown("""
+        **Focus: High F1-Score**
+        
+        • Balance between precision and recall
+        • Optimize overall model performance
+        • Use AutoML for best parameter tuning
+        • Compare multiple models systematically
+        """)
+    
+    st.markdown("---")
+    st.markdown("*💡 Choose your strategy based on your risk tolerance and investment goals.*")
 
 # Load data
 if st.session_state.data is None:
@@ -869,6 +908,30 @@ with tab3:
             if selected_model_name and selected_model_name in valid_results:
                 selected_result = valid_results[selected_model_name]
                 
+                # Cache expensive computations
+                @st.cache_data
+                def get_model_visualizations(model_name, cm_data, feature_names, model_type):
+                    """Cache model visualizations to improve performance"""
+                    try:
+                        # Confusion Matrix
+                        cm_fig = create_confusion_matrix_plot(cm_data, model_name)
+                        
+                        # Feature Importance (if available)
+                        fi_fig = None
+                        if feature_names and len(feature_names) > 0:
+                            # Check if we can get feature importance
+                            if hasattr(selected_result['model'], 'feature_importances_'):
+                                importances = selected_result['model'].feature_importances_
+                                fi_fig = create_feature_importance_plot(selected_result, feature_names)
+                            elif hasattr(selected_result['model'], 'coef_'):
+                                importances = np.abs(selected_result['model'].coef_[0])
+                                fi_fig = create_feature_importance_plot(selected_result, feature_names)
+                        
+                        return cm_fig, fi_fig
+                    except Exception as e:
+                        st.error(f"Error creating visualizations: {str(e)}")
+                        return None, None
+                
                 # Model details in expandable sections
                 with st.expander(f"📋 {selected_result['name']} - Model Details", expanded=True):
                     
@@ -891,47 +954,50 @@ with tab3:
                             balance_info = selected_result['class_balance']
                             st.metric("Imbalance Ratio", f"{balance_info['imbalance_ratio']:.2f}")
                 
-                # Visualizations
+                # Get cached visualizations
+                feature_names_for_viz = selected_features if 'selected_features' in locals() else []
+                model_type = type(selected_result['model']).__name__
+                
+                cm_fig, fi_fig = get_model_visualizations(
+                    selected_result['name'],
+                    selected_result['confusion_matrix'],
+                    feature_names_for_viz,
+                    model_type
+                )
+                
+                # Display visualizations
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    # Confusion Matrix
-                    try:
-                        fig_cm = create_confusion_matrix_plot(
-                            selected_result['confusion_matrix'],
-                            selected_result['name']
-                        )
-                        st.plotly_chart(fig_cm, use_container_width=True)
-                    except Exception as e:
-                        st.error(f"Error creating confusion matrix: {str(e)}")
+                    if cm_fig:
+                        st.plotly_chart(cm_fig, use_container_width=True)
+                    else:
+                        st.error("Could not generate confusion matrix")
                 
                 with col2:
-                    # Feature Importance
-                    try:
-                        if 'selected_features' in locals():
-                            fig_fi = create_feature_importance_plot(selected_result, selected_features)
-                            if fig_fi:
-                                st.plotly_chart(fig_fi, use_container_width=True)
-                            else:
-                                st.info("Feature importance not available for this model type.")
-                        else:
-                            st.info("Feature information not available. Please retrain models.")
-                    except Exception as e:
-                        st.error(f"Error creating feature importance plot: {str(e)}")
+                    if fi_fig:
+                        st.plotly_chart(fi_fig, use_container_width=True)
+                    else:
+                        st.info("Feature importance not available for this model type.")
                 
                 # Classification Report
                 with st.expander("📊 Detailed Classification Report"):
                     try:
                         if 'classification_report' in selected_result:
-                            report_df = pd.DataFrame(selected_result['classification_report']).transpose()
+                            # Use cached data processing
+                            @st.cache_data
+                            def process_classification_report(report_data):
+                                report_df = pd.DataFrame(report_data).transpose()
+                                
+                                # Format numeric columns
+                                for col in ['precision', 'recall', 'f1-score']:
+                                    if col in report_df.columns:
+                                        report_df[col] = report_df[col].apply(
+                                            lambda x: f"{x:.3f}" if isinstance(x, (int, float)) else str(x)
+                                        )
+                                return report_df
                             
-                            # Format numeric columns
-                            for col in ['precision', 'recall', 'f1-score']:
-                                if col in report_df.columns:
-                                    report_df[col] = report_df[col].apply(
-                                        lambda x: f"{x:.3f}" if isinstance(x, (int, float)) else str(x)
-                                    )
-                            
+                            report_df = process_classification_report(selected_result['classification_report'])
                             st.dataframe(report_df, use_container_width=True)
                         else:
                             st.warning("Classification report not available")
@@ -941,84 +1007,85 @@ with tab3:
                 # AutoML specific information
                 if 'automl_params' in selected_result:
                     with st.expander("🚀 AutoML Optimization Results"):
-                        st.subheader("Best Parameters Found:")
-                        for param, value in selected_result['automl_params'].items():
-                            st.text(f"• {param}: {value}")
+                        col1, col2 = st.columns(2)
                         
-                        st.subheader("Optimization Details:")
-                        st.text(f"• Best {automl_metric if 'automl_metric' in locals() else 'metric'} Score: {selected_result['automl_best_score']:.3f}")
-                        st.text(f"• Total Trials: {n_trials if 'n_trials' in locals() else 'N/A'}")
+                        with col1:
+                            st.subheader("Best Parameters:")
+                            for param, value in selected_result['automl_params'].items():
+                                st.text(f"• {param}: {value}")
+                        
+                        with col2:
+                            st.subheader("Optimization Details:")
+                            st.metric("Best Score", f"{selected_result['automl_best_score']:.3f}")
+                            st.metric("Trials Run", f"{n_trials if 'n_trials' in locals() else 'N/A'}")
+                            st.text(f"• Optimized for: {automl_metric.upper() if 'automl_metric' in locals() else 'F1'}")
 
-# Model deployment section
+
+# Model Parameters Section
 st.markdown("---")
-st.subheader("🚀 Model Deployment")
+st.subheader("🔧 Model Parameters & Configuration")
 
 if st.session_state.model_results:
     valid_results = {k: v for k, v in st.session_state.model_results.items() if v is not None}
     
     if valid_results:
-        # Select best model for deployment
-        best_model_name = st.selectbox(
-            "Select Model for Deployment",
-            list(valid_results.keys()),
-            index=0
-        )
+        # Create tabs for different parameter views
+        param_tab1, param_tab2 = st.tabs(["📋 Model Parameters", "🎯 AutoML Results"])
         
-        col1, col2 = st.columns(2)
+        with param_tab1:
+            st.subheader("Standard Model Parameters")
+            
+            for model_name, result in valid_results.items():
+                if 'AutoML' not in model_name:  # Show only non-AutoML models
+                    with st.expander(f"⚙️ {model_name} Parameters"):
+                        model = result['model']
+                        params = model.get_params()
+                        
+                        # Display key parameters in columns
+                        param_cols = st.columns(3)
+                        param_count = 0
+                        
+                        for param, value in params.items():
+                            if param_count < 9:  # Show first 9 parameters
+                                with param_cols[param_count % 3]:
+                                    st.metric(param, str(value)[:20])
+                                param_count += 1
         
-        with col1:
-            if st.button("💾 Save Model Configuration"):
-                try:
-                    model_info = {
-                        'model_name': best_model_name,
-                        'performance': valid_results[best_model_name],
-                        'features_used': selected_features if 'selected_features' in locals() else [],
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    st.success(f"✅ Model configuration saved for {best_model_name}")
-                    st.json(model_info)
-                except Exception as e:
-                    st.error(f"Error saving model: {str(e)}")
-        
-        with col2:
-            if st.button("📊 Generate Performance Report"):
-                try:
-                    # Create a comprehensive performance report
-                    st.subheader("📈 Performance Report")
-                    
-                    report_data = {
-                        'Model': best_model_name,
-                        'Training Date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        'Performance Metrics': {
-                            'Accuracy': f"{valid_results[best_model_name]['accuracy']:.3f}",
-                            'F1-Score': f"{valid_results[best_model_name]['f1_score']:.3f}",
-                            'Precision': f"{valid_results[best_model_name]['precision']:.3f}",
-                            'Recall': f"{valid_results[best_model_name]['recall']:.3f}",
-                        },
-                        'Resampling Strategy': valid_results[best_model_name]['resampling_info'],
-                        'Data Info': {
-                            'Total Samples': len(df),
-                            'Training Samples': int(len(df) * 0.8),
-                            'Test Samples': len(df) - int(len(df) * 0.8),
-                            'Features Used': len(selected_features) if 'selected_features' in locals() else 'N/A'
-                        }
-                    }
-                    
-                    st.json(report_data)
-                    st.success("✅ Performance report generated successfully")
-                    
-                except Exception as e:
-                    st.error(f"Error generating report: {str(e)}")
+        with param_tab2:
+            st.subheader("AutoML Optimization Results")
+            
+            automl_found = False
+            for model_name, result in valid_results.items():
+                if 'AutoML' in model_name and 'automl_params' in result:
+                    automl_found = True
+                    with st.expander(f"🚀 {model_name} - Best Parameters"):
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write("**Optimized Parameters:**")
+                            for param, value in result['automl_params'].items():
+                                st.text(f"• {param}: {value}")
+                        
+                        with col2:
+                            st.write("**Performance:**")
+                            st.metric("Best Score", f"{result['automl_best_score']:.3f}")
+                            st.metric("Final F1-Score", f"{result['f1_score']:.3f}")
+                            st.metric("Final Accuracy", f"{result['accuracy']:.3f}")
+            
+            if not automl_found:
+                st.info("No AutoML models found. Enable AutoML in the Model Lab to see optimization results.")
+    
 else:
-    st.info("Train some models first to enable deployment options.")
+    st.info("Train some models first to see their parameters and configurations.")
 
 # Footer with enhanced information
 st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; padding: 20px;'>
-        <h4>Stock Market Prediction Dashboard</h4>
-        <p><strong>Features:</strong> SMOTE handling • Multiple fallback strategies • Class weight balancing • AutoML optimization</p>
+        <h4>🚀 Enhanced Stock Market Prediction Dashboard</h4>
+        <p><strong>Features:</strong> Robust SMOTE handling • Multiple fallback strategies • Class weight balancing • AutoML optimization</p>
         <p><strong>Built with:</strong> Streamlit • Scikit-learn • Plotly • Optuna</p>
         <p><em>Made by Ahmed Awad</em></p>
     </div>
