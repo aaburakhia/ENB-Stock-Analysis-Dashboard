@@ -113,7 +113,7 @@ def create_time_series_plot(df, feature):
 def create_distribution_plot(df, feature):
     """Create distribution plot for selected feature"""
     fig = make_subplots(rows=1, cols=2, 
-                       subplot_titles=(f'{feature} Distribution', f'{feature} by Target'))
+                       subplot_titles=(f'{feature} Distribution', f'{feature} by Movement'))
     
     # Histogram
     fig.add_trace(go.Histogram(x=df[feature], nbinsx=30, name='Distribution'), row=1, col=1)
@@ -121,86 +121,97 @@ def create_distribution_plot(df, feature):
     # Box plot by target
     for target in df['Target'].unique():
         data = df[df['Target'] == target][feature]
-        fig.add_trace(go.Box(y=data, name=f'Target {target}'), row=1, col=2)
+        movement_type = 'Up Movement' if target == 1 else 'Down Movement'
+        fig.add_trace(go.Box(y=data, name=movement_type), row=1, col=2)
     
     fig.update_layout(height=400, template="plotly_white")
     return fig
 
 def train_model(X_train, X_test, y_train, y_test, model_name, model, use_smote=True):
     """Train a single model and return results"""
-    if use_smote:
-        smote = SMOTE(random_state=42)
-        X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
-    else:
-        X_train_res, y_train_res = X_train, y_train
-    
-    # Train model
-    model.fit(X_train_res, y_train_res)
-    
-    # Predictions
-    y_pred = model.predict(X_test)
-    y_pred_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, 'predict_proba') else None
-    
-    # Metrics
-    accuracy = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
-    auc = roc_auc_score(y_test, y_pred_proba) if y_pred_proba is not None else None
-    
-    return {
-        'model': model,
-        'name': model_name,
-        'predictions': y_pred,
-        'probabilities': y_pred_proba,
-        'accuracy': accuracy,
-        'f1_score': f1,
-        'auc_score': auc,
-        'confusion_matrix': confusion_matrix(y_test, y_pred),
-        'classification_report': classification_report(y_test, y_pred, output_dict=True)
-    }
+    try:
+        if use_smote and len(np.unique(y_train)) > 1:
+            smote = SMOTE(random_state=42)
+            X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+        else:
+            X_train_res, y_train_res = X_train, y_train
+        
+        # Train model
+        model.fit(X_train_res, y_train_res)
+        
+        # Predictions
+        y_pred = model.predict(X_test)
+        y_pred_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, 'predict_proba') else None
+        
+        # Metrics
+        accuracy = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred, zero_division=0)
+        auc = roc_auc_score(y_test, y_pred_proba) if y_pred_proba is not None else None
+        
+        return {
+            'model': model,
+            'name': model_name,
+            'predictions': y_pred,
+            'probabilities': y_pred_proba,
+            'accuracy': accuracy,
+            'f1_score': f1,
+            'auc_score': auc,
+            'confusion_matrix': confusion_matrix(y_test, y_pred),
+            'classification_report': classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+        }
+    except Exception as e:
+        st.error(f"Error training {model_name}: {str(e)}")
+        return None
 
 def run_automl_optimization(X_train, X_test, y_train, y_test, model_type, n_trials=50):
     """Run AutoML optimization using Optuna"""
     
     def objective(trial):
-        if model_type == "Random Forest":
-            n_estimators = trial.suggest_int('n_estimators', 10, 200)
-            max_depth = trial.suggest_int('max_depth', 3, 20)
-            min_samples_split = trial.suggest_int('min_samples_split', 2, 20)
-            model = RandomForestClassifier(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                min_samples_split=min_samples_split,
-                random_state=42
-            )
-        elif model_type == "Gradient Boosting":
-            n_estimators = trial.suggest_int('n_estimators', 50, 200)
-            max_depth = trial.suggest_int('max_depth', 3, 10)
-            learning_rate = trial.suggest_float('learning_rate', 0.01, 0.3)
-            model = GradientBoostingClassifier(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                learning_rate=learning_rate,
-                random_state=42
-            )
-        elif model_type == "SVM":
-            C = trial.suggest_float('C', 0.1, 10)
-            gamma = trial.suggest_categorical('gamma', ['scale', 'auto'])
-            kernel = trial.suggest_categorical('kernel', ['rbf', 'linear'])
-            model = SVC(C=C, gamma=gamma, kernel=kernel, probability=True, random_state=42)
-        else:  # Logistic Regression
-            C = trial.suggest_float('C', 0.01, 10)
-            model = LogisticRegression(C=C, random_state=42)
-        
-        # Use SMOTE
-        smote = SMOTE(random_state=42)
-        X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
-        
-        model.fit(X_train_res, y_train_res)
-        y_pred = model.predict(X_test)
-        return f1_score(y_test, y_pred)
+        try:
+            if model_type == "Random Forest":
+                n_estimators = trial.suggest_int('n_estimators', 10, 200)
+                max_depth = trial.suggest_int('max_depth', 3, 20)
+                min_samples_split = trial.suggest_int('min_samples_split', 2, 20)
+                model = RandomForestClassifier(
+                    n_estimators=n_estimators,
+                    max_depth=max_depth,
+                    min_samples_split=min_samples_split,
+                    random_state=42
+                )
+            elif model_type == "Gradient Boosting":
+                n_estimators = trial.suggest_int('n_estimators', 50, 200)
+                max_depth = trial.suggest_int('max_depth', 3, 10)
+                learning_rate = trial.suggest_float('learning_rate', 0.01, 0.3)
+                model = GradientBoostingClassifier(
+                    n_estimators=n_estimators,
+                    max_depth=max_depth,
+                    learning_rate=learning_rate,
+                    random_state=42
+                )
+            elif model_type == "SVM":
+                C = trial.suggest_float('C', 0.1, 10)
+                gamma = trial.suggest_categorical('gamma', ['scale', 'auto'])
+                kernel = trial.suggest_categorical('kernel', ['rbf', 'linear'])
+                model = SVC(C=C, gamma=gamma, kernel=kernel, probability=True, random_state=42)
+            else:  # Logistic Regression
+                C = trial.suggest_float('C', 0.01, 10)
+                model = LogisticRegression(C=C, random_state=42, max_iter=1000)
+            
+            # Use SMOTE if classes are balanced
+            if len(np.unique(y_train)) > 1:
+                smote = SMOTE(random_state=42)
+                X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+            else:
+                X_train_res, y_train_res = X_train, y_train
+            
+            model.fit(X_train_res, y_train_res)
+            y_pred = model.predict(X_test)
+            return f1_score(y_test, y_pred, zero_division=0)
+        except Exception:
+            return 0.0
     
-    study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=n_trials)
+    study = optuna.create_study(direction='maximize', verbosity=0)
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     
     # Train best model
     best_params = study.best_params
@@ -212,7 +223,7 @@ def run_automl_optimization(X_train, X_test, y_train, y_test, model_type, n_tria
     elif model_type == "SVM":
         best_model = SVC(**best_params, probability=True, random_state=42)
     else:
-        best_model = LogisticRegression(**best_params, random_state=42)
+        best_model = LogisticRegression(**best_params, random_state=42, max_iter=1000)
     
     return train_model(X_train, X_test, y_train, y_test, f"{model_type} (AutoML)", best_model)
 
@@ -263,8 +274,8 @@ def create_confusion_matrix_plot(cm, model_name):
         aspect="auto",
         title=f"Confusion Matrix - {model_name}",
         labels=dict(x="Predicted", y="Actual"),
-        x=['Negative', 'Positive'],
-        y=['Negative', 'Positive'],
+        x=['Down Movement', 'Up Movement'],
+        y=['Down Movement', 'Up Movement'],
         color_continuous_scale="Blues"
     )
     fig.update_layout(height=400)
@@ -335,8 +346,8 @@ with tab1:
         
         # Class distribution
         target_dist = df['Target'].value_counts()
-        st.metric("Positive Cases", target_dist.get(1, 0))
-        st.metric("Negative Cases", target_dist.get(0, 0))
+        st.metric("Up Movement Cases", target_dist.get(1, 0))
+        st.metric("Down Movement Cases", target_dist.get(0, 0))
         st.metric("Class Balance", f"{target_dist.get(1, 0) / len(df):.1%}")
     
     with col1:
@@ -439,14 +450,16 @@ with tab2:
                 status_text.text(f"Training {model_name}...")
                 model = available_models[model_name]
                 result = train_model(X_train_scaled, X_test_scaled, y_train, y_test, model_name, model, use_smote)
-                st.session_state.model_results[model_name] = result
+                if result:  # Only add if training was successful
+                    st.session_state.model_results[model_name] = result
                 progress_bar.progress((i + 1) / total_models)
             
             # Train AutoML model if selected
             if use_automl:
                 status_text.text(f"Running AutoML optimization for {automl_model}...")
                 automl_result = run_automl_optimization(X_train_scaled, X_test_scaled, y_train, y_test, automl_model, n_trials)
-                st.session_state.model_results[f"{automl_model} (AutoML)"] = automl_result
+                if automl_result:  # Only add if training was successful
+                    st.session_state.model_results[f"{automl_model} (AutoML)"] = automl_result
                 progress_bar.progress(1.0)
             
             status_text.text("Training completed!")
@@ -573,5 +586,5 @@ with tab3:
 st.markdown("---")
 st.markdown(
     "🚀 **Stock Market Prediction Dashboard** | Built with Streamlit | "
-    "University Capstone Project 2025"
+    "Made by Ahmed Awad"
 )
