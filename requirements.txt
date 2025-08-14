@@ -4,5 +4,7 @@ plotly
 scikit-learn
 numpy
 joblib
-statsmodels
-scipy
+imblearn
+optuna
+seaborn
+matplotlib
