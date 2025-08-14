@@ -132,11 +132,12 @@ def train_model(X_train, X_test, y_train, y_test, model_name, model, use_smote=T
     try:
         if use_smote and len(np.unique(y_train)) > 1:
             try:
-                smote = SMOTE(random_state=42)
+                # Use a more robust SMOTE configuration
+                smote = SMOTE(random_state=42, k_neighbors=min(5, len(y_train[y_train == 1]) - 1))
                 X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
             except Exception as e:
                 # If SMOTE fails, use original data
-                st.warning(f"SMOTE failed for {model_name}, using original data: {str(e)}")
+                st.warning(f"SMOTE failed for {model_name}, using original data")
                 X_train_res, y_train_res = X_train, y_train
         else:
             X_train_res, y_train_res = X_train, y_train
@@ -209,8 +210,14 @@ def run_automl_optimization(X_train, X_test, y_train, y_test, model_type, metric
             # Use SMOTE if classes are balanced
             if len(np.unique(y_train)) > 1:
                 try:
-                    smote = SMOTE(random_state=42)
-                    X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+                    # More robust SMOTE configuration
+                    minority_class_count = min(np.bincount(y_train))
+                    k_neighbors = min(5, minority_class_count - 1) if minority_class_count > 1 else 1
+                    if k_neighbors >= 1:
+                        smote = SMOTE(random_state=42, k_neighbors=k_neighbors)
+                        X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+                    else:
+                        X_train_res, y_train_res = X_train, y_train
                 except Exception:
                     # If SMOTE fails, use original data
                     X_train_res, y_train_res = X_train, y_train
@@ -234,8 +241,13 @@ def run_automl_optimization(X_train, X_test, y_train, y_test, model_type, metric
             return 0.0
     
     try:
-        study = optuna.create_study(direction='maximize', verbosity=0)
-        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+        # Create study without verbosity parameter (not available in all versions)
+        study = optuna.create_study(direction='maximize')
+        
+        # Suppress Optuna logs
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        
+        study.optimize(objective, n_trials=n_trials)
         
         # Train best model
         best_params = study.best_params
