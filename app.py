@@ -516,8 +516,8 @@ st.markdown(
         <p><em>Made by Ahmed Awad</em></p>
     </div>
     """, 
-    unsafe_allow_html=True
-) import streamlit as st
+    unsafe_allow_html=True) 
+import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
