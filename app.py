@@ -171,6 +171,7 @@ def create_price_trend_analysis(df_raw):
 
 def create_return_distribution(df_raw):
     """2. Daily return distribution"""
+    df_raw = df_raw.copy()
     df_raw['Daily_Return'] = df_raw['Adjusted Close'].pct_change() * 100
     
     fig = make_subplots(rows=1, cols=2, 
@@ -178,7 +179,7 @@ def create_return_distribution(df_raw):
     
     # Histogram
     fig.add_trace(go.Histogram(x=df_raw['Daily_Return'].dropna(), 
-                              bins=50, name='Returns Distribution', 
+                              nbinsx=50, name='Returns Distribution', 
                               marker_color='lightblue'), row=1, col=1)
     
     # Time series
