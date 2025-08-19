@@ -1,4 +1,523 @@
-import streamlit as st
+with tab3:
+    st.header("Model Lab")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col2:
+        st.subheader("Model Configuration")
+        
+        # Feature selection
+        feature_cols = [col for col in df.columns if col != 'Target']
+        selected_features = st.multiselect(
+            "Select Features",
+            feature_cols,
+            default=feature_cols[:5] if len(feature_cols) > 5 else feature_cols  # Limit default selection
+        )
+        
+        # Resampling strategy
+        resampling_options = {
+            "Auto (Robust)": "auto",
+            "SMOTE Only": "smote", 
+            "ADASYN Only": "adasyn",
+            "No Resampling": "none"
+        }
+        
+        resampling_method = st.selectbox(
+            "Class Balancing Strategy",
+            list(resampling_options.keys()),
+            index=0,
+            help="Auto mode tries multiple methods and falls back gracefully"
+        )
+        
+        # Model selection with better defaults
+        available_models = {
+            "Logistic Regression": LogisticRegression(random_state=42, max_iter=1000),
+            "Random Forest": RandomForestClassifier(random_state=42, n_estimators=100),
+            "Gradient Boosting": GradientBoostingClassifier(random_state=42),
+            "SVM": SVC(probability=True, random_state=42),
+            "Naive Bayes": GaussianNB(),
+            "K-Nearest Neighbors": KNeighborsClassifier(n_neighbors=5)
+        }
+        
+        selected_models = st.multiselect(
+            "Select Models",
+            list(available_models.keys()),
+            default=["Logistic Regression", "Random Forest"],
+            help="Start with 1-2 models for faster training"
+        )
+        
+        # Advanced options
+        with st.expander("Advanced Options"):
+            use_class_weights = st.checkbox("Use Class Weights", value=True, 
+                                          help="Automatically balance classes using sample weights")
+            
+            # AutoML option
+            use_automl = st.checkbox("🚀 Use AutoML Optimization")
+            if use_automl:
+                n_trials = st.slider("AutoML Trials", 10, 100, 30)
+                automl_model = st.selectbox(
+                    "Model for AutoML",
+                    ["Random Forest", "Gradient Boosting", "SVM", "Logistic Regression"]
+                )
+                automl_metric = st.selectbox(
+                    "Optimization Metric",
+                    ["f1", "precision", "recall", "accuracy"],
+                    help="Metric to optimize during hyperparameter search"
+                )
+        
+        # Train models button
+        if st.button("🏋️ Train Models", type="primary"):
+            if selected_features and selected_models:
+                st.session_state.models_trained = True
+                st.session_state.model_results = {}
+    
+    with col1:
+        st.subheader("Training Results")
+        
+        if st.session_state.models_trained and selected_features:
+            # Prepare data
+            X = df[selected_features]
+            y = df['Target']
+            
+            # Check for data issues
+            if X.isnull().any().any():
+                st.warning("⚠️ Found missing values in features. Please clean your data.")
+                X = X.fillna(X.mean())  # Simple imputation
+            
+            # Train-test split (chronological)
+            split_index = int(len(df) * 0.8)
+            X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
+            y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
+            
+            # Display data split info
+            st.info(f"Training samples: {len(X_train)} | Test samples: {len(X_test)}")
+            
+            # Analyze class balance in training set
+            train_balance = analyze_class_balance(y_train.values)
+            if train_balance['imbalance_ratio'] > 3:
+                st.warning(f"⚠️ High class imbalance detected (ratio: {train_balance['imbalance_ratio']:.2f})")
+            
+            # Scale features
+            try:
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                X_test_scaled = scaler.transform(X_test)
+            except Exception as e:
+                st.error(f"Error scaling features: {str(e)}")
+                st.stop()
+            
+            # Progress tracking
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            results_container = st.container()
+            
+            total_models = len(selected_models) + (1 if use_automl else 0)
+            current_model = 0
+            
+            # Train regular models
+            for model_name in selected_models:
+                current_model += 1
+                status_text.text(f"Training {model_name} ({current_model}/{total_models})...")
+                
+                model = available_models[model_name]
+                result = train_model(
+                    X_train_scaled, X_test_scaled, y_train, y_test, 
+                    model_name, model, 
+                    resampling_options[resampling_method], 
+                    use_class_weights
+                )
+                
+                if result:
+                    st.session_state.model_results[model_name] = result
+                    with results_container:
+                        st.success(f"✅ {model_name} trained successfully")
+                        st.text(f"   • {result['resampling_info']}")
+                        st.text(f"   • Accuracy: {result['accuracy']:.3f}, F1: {result['f1_score']:.3f}")
+                else:
+                    with results_container:
+                        st.error(f"❌ {model_name} training failed")
+                
+                progress_bar.progress(current_model / total_models)
+            
+            # Train AutoML model if selected
+            if use_automl:
+                current_model += 1
+                status_text.text(f"Running AutoML for {automl_model} (optimizing {automl_metric.upper()})...")
+                
+                automl_result = run_automl_optimization(
+                    X_train_scaled, X_test_scaled, y_train, y_test, 
+                    automl_model, automl_metric, n_trials
+                )
+                
+                if automl_result:
+                    automl_key = f"{automl_model} (AutoML-{automl_metric.upper()})"
+                    st.session_state.model_results[automl_key] = automl_result
+                    with results_container:
+                        st.success(f"✅ AutoML {automl_model} completed")
+                        st.text(f"   • Best {automl_metric}: {automl_result['automl_best_score']:.3f}")
+                        st.text(f"   • Final F1: {automl_result['f1_score']:.3f}")
+                else:
+                    with results_container:
+                        st.error(f"❌ AutoML {automl_model} failed")
+                
+                progress_bar.progress(1.0)
+            
+            status_text.text("✅ Training completed!")
+            
+            # Display summary results
+            if st.session_state.model_results:
+                st.subheader("📊 Training Summary")
+                
+                results_data = []
+                for result in st.session_state.model_results.values():
+                    results_data.append({
+                        'Model': result['name'],
+                        'Accuracy': f"{result['accuracy']:.3f}",
+                        'F1-Score': f"{result['f1_score']:.3f}",
+                        'Precision': f"{result['precision']:.3f}",
+                        'Recall': f"{result['recall']:.3f}",
+                        'AUC': f"{result['auc_score']:.3f}" if result['auc_score'] else "N/A",
+                        'Resampling': result['resampling_info'][:30] + "..." if len(result['resampling_info']) > 30 else result['resampling_info']
+                    })
+                
+                results_df = pd.DataFrame(results_data)
+                st.dataframe(results_df, use_container_width=True)
+                
+                # Show best performing model
+                if results_data:
+                    best_f1_model = max(st.session_state.model_results.values(), key=lambda x: x['f1_score'])
+                    st.success(f"🏆 Best F1-Score: {best_f1_model['name']} ({best_f1_model['f1_score']:.3f})")
+            else:
+                st.warning("⚠️ No models were successfully trained. Please check your data and configuration.")
+        
+        elif not st.session_state.models_trained:
+            st.info("👈 Configure your models and click 'Train Models' to see results here.")
+            
+            # Show data preview
+            if not df.empty:
+                st.subheader("Data Preview")
+                st.dataframe(df.head(), use_container_width=True)
+
+with tab4:
+    st.header("Performance Center")
+    
+    if not st.session_state.model_results:
+        st.warning("⚠️ No models trained yet. Please go to the Model Lab tab to train some models first.")
+    else:
+        # Model comparison metrics
+        st.subheader("📊 Model Comparison Dashboard")
+        
+        # Get all valid results (filter out None results)
+        valid_results = {k: v for k, v in st.session_state.model_results.items() if v is not None}
+        
+        if not valid_results:
+            st.error("❌ No valid model results found. Please retrain your models.")
+        else:
+            col1, col2, col3, col4 = st.columns(4)
+            
+            # Best model metrics
+            try:
+                best_f1 = max(valid_results.values(), key=lambda x: x['f1_score'])
+                best_acc = max(valid_results.values(), key=lambda x: x['accuracy'])
+                best_precision = max(valid_results.values(), key=lambda x: x['precision'])
+                best_recall = max(valid_results.values(), key=lambda x: x['recall'])
+                
+                with col1:
+                    st.metric(
+                        "🎯 Best F1-Score", 
+                        f"{best_f1['f1_score']:.3f}", 
+                        help=f"Model: {best_f1['name']}"
+                    )
+                with col2:
+                    st.metric(
+                        "🎯 Best Precision", 
+                        f"{best_precision['precision']:.3f}",
+                        help=f"Model: {best_precision['name']}"
+                    )
+                with col3:
+                    st.metric(
+                        "🎯 Best Recall", 
+                        f"{best_recall['recall']:.3f}",
+                        help=f"Model: {best_recall['name']}"
+                    )
+                with col4:
+                    st.metric("📊 Models Trained", len(valid_results))
+            except Exception as e:
+                st.error(f"Error calculating best metrics: {str(e)}")
+            
+            # Detailed comparison charts
+            st.subheader("📈 Performance Comparison")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # ROC Curves
+                try:
+                    models_with_proba = {k: v for k, v in valid_results.items() if v['probabilities'] is not None}
+                    if models_with_proba:
+                        fig_roc = create_roc_curve(models_with_proba)
+                        st.plotly_chart(fig_roc, use_container_width=True)
+                    else:
+                        st.info("📊 ROC curves require models with probability predictions.")
+                except Exception as e:
+                    st.error(f"Error creating ROC curves: {str(e)}")
+            
+            with col2:
+                # Performance metrics comparison
+                try:
+                    metrics_data = []
+                    for result in valid_results.values():
+                        metrics_data.append({
+                            'Model': result['name'][:20] + "..." if len(result['name']) > 20 else result['name'],
+                            'Accuracy': result['accuracy'],
+                            'F1-Score': result['f1_score'],
+                            'Precision': result['precision'],
+                            'Recall': result['recall']
+                        })
+                    
+                    if metrics_data:
+                        metrics_df = pd.DataFrame(metrics_data)
+                        fig_metrics = px.bar(
+                            metrics_df.melt(id_vars='Model', var_name='Metric', value_name='Score'),
+                            x='Model', y='Score', color='Metric',
+                            title="Performance Metrics Comparison",
+                            barmode='group'
+                        )
+                        fig_metrics.update_xaxes(tickangle=45)
+                        fig_metrics.update_layout(height=400)
+                        st.plotly_chart(fig_metrics, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error creating metrics comparison: {str(e)}")
+            
+            # Class imbalance analysis
+            st.subheader("⚖️ Class Balance Analysis")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Show original class distribution
+                target_dist = df['Target'].value_counts().sort_index()
+                fig_class_dist = px.pie(
+                    values=target_dist.values,
+                    names=['Down Movement', 'Up Movement'],
+                    title="Original Class Distribution",
+                    color_discrete_sequence=['#ff6b6b', '#4ecdc4']
+                )
+                st.plotly_chart(fig_class_dist, use_container_width=True)
+            
+            with col2:
+                # Show resampling summary
+                st.subheader("Resampling Summary")
+                resampling_summary = []
+                for model_name, result in valid_results.items():
+                    if result and 'resampling_info' in result:
+                        resampling_summary.append({
+                            'Model': model_name,
+                            'Strategy': result['resampling_info']
+                        })
+                
+                if resampling_summary:
+                    resampling_df = pd.DataFrame(resampling_summary)
+                    st.dataframe(resampling_df, use_container_width=True)
+                else:
+                    st.info("No resampling information available")
+            
+            # Individual model analysis
+            st.subheader("🔍 Individual Model Analysis")
+            
+            model_names = list(valid_results.keys())
+            selected_model_name = st.selectbox(
+                "Select Model for Detailed Analysis",
+                model_names,
+                key="model_analysis_selector"
+            )
+            
+            if selected_model_name and selected_model_name in valid_results:
+                selected_result = valid_results[selected_model_name]
+                
+                # Cache expensive computations
+                @st.cache_data
+                def get_model_visualizations(model_name, cm_data, feature_names, model_type):
+                    """Cache model visualizations to improve performance"""
+                    try:
+                        # Confusion Matrix
+                        cm_fig = create_confusion_matrix_plot(cm_data, model_name)
+                        
+                        # Feature Importance (if available)
+                        fi_fig = None
+                        if feature_names and len(feature_names) > 0:
+                            # Check if we can get feature importance
+                            if hasattr(selected_result['model'], 'feature_importances_'):
+                                importances = selected_result['model'].feature_importances_
+                                fi_fig = create_feature_importance_plot(selected_result, feature_names)
+                            elif hasattr(selected_result['model'], 'coef_'):
+                                importances = np.abs(selected_result['model'].coef_[0])
+                                fi_fig = create_feature_importance_plot(selected_result, feature_names)
+                        
+                        return cm_fig, fi_fig
+                    except Exception as e:
+                        st.error(f"Error creating visualizations: {str(e)}")
+                        return None, None
+                
+                # Model details in expandable sections
+                with st.expander(f"📋 {selected_result['name']} - Model Details", expanded=True):
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("Accuracy", f"{selected_result['accuracy']:.3f}")
+                        st.metric("Precision", f"{selected_result['precision']:.3f}")
+                    
+                    with col2:
+                        st.metric("Recall", f"{selected_result['recall']:.3f}")
+                        st.metric("F1-Score", f"{selected_result['f1_score']:.3f}")
+                    
+                    with col3:
+                        if selected_result['auc_score']:
+                            st.metric("AUC Score", f"{selected_result['auc_score']:.3f}")
+                        
+                        # Class balance info
+                        if 'class_balance' in selected_result:
+                            balance_info = selected_result['class_balance']
+                            st.metric("Imbalance Ratio", f"{balance_info['imbalance_ratio']:.2f}")
+                
+                # Get cached visualizations
+                feature_names_for_viz = selected_features if 'selected_features' in locals() else []
+                model_type = type(selected_result['model']).__name__
+                
+                cm_fig, fi_fig = get_model_visualizations(
+                    selected_result['name'],
+                    selected_result['confusion_matrix'],
+                    feature_names_for_viz,
+                    model_type
+                )
+                
+                # Display visualizations
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if cm_fig:
+                        st.plotly_chart(cm_fig, use_container_width=True)
+                    else:
+                        st.error("Could not generate confusion matrix")
+                
+                with col2:
+                    if fi_fig:
+                        st.plotly_chart(fi_fig, use_container_width=True)
+                    else:
+                        st.info("Feature importance not available for this model type.")
+                
+                # Classification Report
+                with st.expander("📊 Detailed Classification Report"):
+                    try:
+                        if 'classification_report' in selected_result:
+                            # Use cached data processing
+                            @st.cache_data
+                            def process_classification_report(report_data):
+                                report_df = pd.DataFrame(report_data).transpose()
+                                
+                                # Format numeric columns
+                                for col in ['precision', 'recall', 'f1-score']:
+                                    if col in report_df.columns:
+                                        report_df[col] = report_df[col].apply(
+                                            lambda x: f"{x:.3f}" if isinstance(x, (int, float)) else str(x)
+                                        )
+                                return report_df
+                            
+                            report_df = process_classification_report(selected_result['classification_report'])
+                            st.dataframe(report_df, use_container_width=True)
+                        else:
+                            st.warning("Classification report not available")
+                    except Exception as e:
+                        st.error(f"Error displaying classification report: {str(e)}")
+                
+                # AutoML specific information
+                if 'automl_params' in selected_result:
+                    with st.expander("🚀 AutoML Optimization Results"):
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.subheader("Best Parameters:")
+                            for param, value in selected_result['automl_params'].items():
+                                st.text(f"• {param}: {value}")
+                        
+                        with col2:
+                            st.subheader("Optimization Details:")
+                            st.metric("Best Score", f"{selected_result['automl_best_score']:.3f}")
+                            st.metric("Trials Run", f"{n_trials if 'n_trials' in locals() else 'N/A'}")
+                            st.text(f"• Optimized for: {automl_metric.upper() if 'automl_metric' in locals() else 'F1'}")
+
+# Model Parameters Section
+st.markdown("---")
+st.subheader("🔧 Model Parameters & Configuration")
+
+if st.session_state.model_results:
+    valid_results = {k: v for k, v in st.session_state.model_results.items() if v is not None}
+    
+    if valid_results:
+        # Create tabs for different parameter views
+        param_tab1, param_tab2 = st.tabs(["📋 Model Parameters", "🎯 AutoML Results"])
+        
+        with param_tab1:
+            st.subheader("Standard Model Parameters")
+            
+            for model_name, result in valid_results.items():
+                if 'AutoML' not in model_name:  # Show only non-AutoML models
+                    with st.expander(f"⚙️ {model_name} Parameters"):
+                        model = result['model']
+                        params = model.get_params()
+                        
+                        # Display key parameters in columns
+                        param_cols = st.columns(3)
+                        param_count = 0
+                        
+                        for param, value in params.items():
+                            if param_count < 9:  # Show first 9 parameters
+                                with param_cols[param_count % 3]:
+                                    st.metric(param, str(value)[:20])
+                                param_count += 1
+        
+        with param_tab2:
+            st.subheader("AutoML Optimization Results")
+            
+            automl_found = False
+            for model_name, result in valid_results.items():
+                if 'AutoML' in model_name and 'automl_params' in result:
+                    automl_found = True
+                    with st.expander(f"🚀 {model_name} - Best Parameters"):
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write("**Optimized Parameters:**")
+                            for param, value in result['automl_params'].items():
+                                st.text(f"• {param}: {value}")
+                        
+                        with col2:
+                            st.write("**Performance:**")
+                            st.metric("Best Score", f"{result['automl_best_score']:.3f}")
+                            st.metric("Final F1-Score", f"{result['f1_score']:.3f}")
+                            st.metric("Final Accuracy", f"{result['accuracy']:.3f}")
+            
+            if not automl_found:
+                st.info("No AutoML models found. Enable AutoML in the Model Lab to see optimization results.")
+    
+else:
+    st.info("Train some models first to see their parameters and configurations.")
+
+# Footer with enhanced information
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; padding: 20px;'>
+        <h4>🚀 Enhanced ENB Stock Analysis & Prediction Dashboard</h4>
+        <p><strong>Features:</strong> Comprehensive Stock Analysis • Technical Indicators • Investment Insights • ML Predictions • Risk Assessment</p>
+        <p><strong>Built with:</strong> Streamlit • Scikit-learn • Plotly • Optuna • Technical Analysis</p>
+        <p><em>Made by Ahmed Awad</em></p>
+    </div>
+    """, 
+    unsafe_allow_html=True
+) import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -16,13 +535,13 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 from imblearn.over_sampling import SMOTE, ADASYN, RandomOverSampler
 from sklearn.utils.class_weight import compute_class_weight
 import optuna
-from datetime import datetime
+from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
 # Page config
 st.set_page_config(
-    page_title="Stock Market Analysis & Prediction Dashboard",
+    page_title="ENB Stock Analysis & Prediction Dashboard",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -70,12 +589,11 @@ st.markdown("""
         margin: 10px 0;
     }
     .insight-box {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        background-color: #e7f3ff;
+        border-left: 4px solid #2196F3;
         padding: 15px;
-        border-radius: 10px;
         margin: 10px 0;
-        border-left: 5px solid #ff6b6b;
+        border-radius: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -92,373 +610,21 @@ if 'model_results' not in st.session_state:
 
 @st.cache_data
 def load_data():
-    """Load both raw OHLCV data and preprocessed binary classification data"""
+    """Load and return both raw and preprocessed datasets"""
     try:
         # Load raw OHLCV data
         raw_df = pd.read_csv("ENB_TO_2000_2025_clean.csv")
-        if 'Date' in raw_df.columns:
-            raw_df['Date'] = pd.to_datetime(raw_df['Date'])
-            raw_df.set_index('Date', inplace=True)
-        elif raw_df.index.name != 'Date':
-            raw_df.index = pd.to_datetime(raw_df.index)
+        raw_df['Date'] = pd.to_datetime(raw_df['Date'])
+        raw_df.set_index('Date', inplace=True)
         
         # Load preprocessed data for modeling
-        processed_df = pd.read_csv("ENB_data_binary_classification.csv", index_col=0)
-        processed_df.index = pd.to_datetime(processed_df.index)
+        preprocessed_df = pd.read_csv("ENB_data_binary_classification.csv", index_col=0)
+        preprocessed_df.index = pd.to_datetime(preprocessed_df.index)
         
-        return raw_df, processed_df
+        return raw_df, preprocessed_df
     except FileNotFoundError as e:
-        st.error(f"Dataset not found! Please ensure the CSV files are in the working directory. Error: {str(e)}")
+        st.error(f"Dataset not found! Please ensure files are in the working directory: {str(e)}")
         return None, None
-
-# ============= NEW EDA FUNCTIONS =============
-
-def create_price_overview_plot(df):
-    """Create comprehensive price overview with OHLC and volume"""
-    fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=('ENB Stock Price (OHLC)', 'Trading Volume'),
-        vertical_spacing=0.15,
-        row_heights=[0.7, 0.3]
-    )
-    
-    # OHLC Plot
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close Price', 
-                            line=dict(color='blue', width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['High'], name='High', 
-                            line=dict(color='green', width=1, dash='dot')), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['Low'], name='Low', 
-                            line=dict(color='red', width=1, dash='dot')), row=1, col=1)
-    
-    # Volume Plot
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='Volume', 
-                        marker_color='lightblue', opacity=0.7), row=2, col=1)
-    
-    fig.update_layout(
-        title="ENB Stock Analysis: Price Movement & Trading Activity",
-        height=600,
-        template="plotly_white",
-        showlegend=True
-    )
-    
-    fig.update_xaxes(title_text="Date", row=2, col=1)
-    fig.update_yaxes(title_text="Price ($CAD)", row=1, col=1)
-    fig.update_yaxes(title_text="Volume", row=2, col=1)
-    
-    return fig
-
-def create_price_distribution_analysis(df):
-    """Analyze price distributions and returns"""
-    # Calculate daily returns
-    df['Daily_Return'] = df['Close'].pct_change() * 100
-    
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=('Price Distribution', 'Daily Returns Distribution', 
-                       'Price vs Volume', 'Monthly Returns Box Plot'),
-        specs=[[{"type": "histogram"}, {"type": "histogram"}],
-               [{"type": "scatter"}, {"type": "box"}]]
-    )
-    
-    # Price Distribution
-    fig.add_trace(go.Histogram(x=df['Close'], nbinsx=50, name='Close Price', 
-                              marker_color='skyblue'), row=1, col=1)
-    
-    # Daily Returns Distribution
-    fig.add_trace(go.Histogram(x=df['Daily_Return'].dropna(), nbinsx=50, 
-                              name='Daily Returns (%)', marker_color='orange'), row=1, col=2)
-    
-    # Price vs Volume Scatter
-    fig.add_trace(go.Scatter(x=df['Volume'], y=df['Close'], mode='markers',
-                            name='Price vs Volume', marker=dict(size=4, opacity=0.6)), row=2, col=1)
-    
-    # Monthly Returns Box Plot
-    df['Month'] = df.index.month
-    for month in sorted(df['Month'].unique()):
-        month_data = df[df['Month'] == month]['Daily_Return'].dropna()
-        fig.add_trace(go.Box(y=month_data, name=f'Month {month}', 
-                            showlegend=False), row=2, col=2)
-    
-    fig.update_layout(height=800, template="plotly_white", 
-                     title="ENB Stock: Price and Return Distributions")
-    
-    return fig
-
-def create_volatility_analysis(df):
-    """Analyze volatility patterns and trends"""
-    # Calculate rolling volatility (30-day)
-    df['Volatility_30d'] = df['Close'].pct_change().rolling(window=30).std() * np.sqrt(252) * 100
-    
-    # Calculate price ranges
-    df['Daily_Range'] = ((df['High'] - df['Low']) / df['Close']) * 100
-    
-    fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=('30-Day Rolling Volatility (%)', 'Daily Price Range (%)'),
-        vertical_spacing=0.15
-    )
-    
-    # Volatility Plot
-    fig.add_trace(go.Scatter(x=df.index, y=df['Volatility_30d'], 
-                            name='30-Day Volatility', line=dict(color='red', width=2)), row=1, col=1)
-    
-    # Add volatility threshold line
-    mean_volatility = df['Volatility_30d'].mean()
-    fig.add_hline(y=mean_volatility, line_dash="dash", line_color="gray", 
-                  annotation_text=f"Avg: {mean_volatility:.1f}%", row=1, col=1)
-    
-    # Daily Range Plot
-    fig.add_trace(go.Scatter(x=df.index, y=df['Daily_Range'], 
-                            name='Daily Range', line=dict(color='purple', width=1)), row=2, col=1)
-    
-    fig.update_layout(height=600, template="plotly_white", 
-                     title="ENB Stock: Volatility Analysis for Investment Timing")
-    fig.update_yaxes(title_text="Volatility (%)", row=1, col=1)
-    fig.update_yaxes(title_text="Daily Range (%)", row=2, col=1)
-    
-    return fig
-
-def create_seasonal_analysis(df):
-    """Analyze seasonal patterns in stock performance"""
-    df['Month'] = df.index.month
-    df['Year'] = df.index.year
-    df['Quarter'] = df.index.quarter
-    df['DayOfWeek'] = df.index.dayofweek
-    df['Daily_Return'] = df['Close'].pct_change() * 100
-    
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=('Average Returns by Month', 'Average Returns by Quarter', 
-                       'Average Returns by Day of Week', 'Yearly Performance'),
-        specs=[[{"type": "bar"}, {"type": "bar"}],
-               [{"type": "bar"}, {"type": "scatter"}]]
-    )
-    
-    # Monthly Returns
-    monthly_returns = df.groupby('Month')['Daily_Return'].mean()
-    month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-    colors_monthly = ['red' if x < 0 else 'green' for x in monthly_returns.values]
-    
-    fig.add_trace(go.Bar(x=month_names, y=monthly_returns.values, 
-                        name='Monthly Avg Return', marker_color=colors_monthly), row=1, col=1)
-    
-    # Quarterly Returns
-    quarterly_returns = df.groupby('Quarter')['Daily_Return'].mean()
-    colors_quarterly = ['red' if x < 0 else 'green' for x in quarterly_returns.values]
-    
-    fig.add_trace(go.Bar(x=[f'Q{i}' for i in quarterly_returns.index], 
-                        y=quarterly_returns.values, name='Quarterly Avg Return',
-                        marker_color=colors_quarterly), row=1, col=2)
-    
-    # Day of Week Returns
-    dow_returns = df.groupby('DayOfWeek')['Daily_Return'].mean()
-    dow_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-    colors_dow = ['red' if x < 0 else 'green' for x in dow_returns.values]
-    
-    fig.add_trace(go.Bar(x=dow_names, y=dow_returns.values, 
-                        name='Day of Week Avg Return', marker_color=colors_dow), row=2, col=1)
-    
-    # Yearly Performance
-    yearly_returns = df.groupby('Year')['Close'].apply(lambda x: ((x.iloc[-1] - x.iloc[0]) / x.iloc[0]) * 100)
-    colors_yearly = ['red' if x < 0 else 'green' for x in yearly_returns.values]
-    
-    fig.add_trace(go.Bar(x=yearly_returns.index, y=yearly_returns.values, 
-                        name='Yearly Return (%)', marker_color=colors_yearly), row=2, col=2)
-    
-    fig.update_layout(height=800, template="plotly_white", 
-                     title="ENB Stock: Seasonal Investment Patterns")
-    
-    return fig
-
-def create_technical_indicators_analysis(df):
-    """Create technical analysis indicators"""
-    # Simple Moving Averages
-    df['SMA_20'] = df['Close'].rolling(window=20).mean()
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    df['SMA_200'] = df['Close'].rolling(window=200).mean()
-    
-    # Bollinger Bands
-    rolling_mean = df['Close'].rolling(window=20).mean()
-    rolling_std = df['Close'].rolling(window=20).std()
-    df['BB_Upper'] = rolling_mean + (rolling_std * 2)
-    df['BB_Lower'] = rolling_mean - (rolling_std * 2)
-    
-    # RSI (simplified version)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    fig = make_subplots(
-        rows=3, cols=1,
-        subplot_titles=('Price with Moving Averages', 'Bollinger Bands', 'RSI Indicator'),
-        vertical_spacing=0.08,
-        row_heights=[0.4, 0.4, 0.2]
-    )
-    
-    # Price with Moving Averages
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close Price', 
-                            line=dict(color='blue', width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], name='SMA 20', 
-                            line=dict(color='orange', width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], name='SMA 50', 
-                            line=dict(color='red', width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA_200'], name='SMA 200', 
-                            line=dict(color='green', width=1)), row=1, col=1)
-    
-    # Bollinger Bands
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Price', 
-                            line=dict(color='blue', width=2)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name='BB Upper', 
-                            line=dict(color='red', width=1, dash='dash')), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name='BB Lower', 
-                            line=dict(color='red', width=1, dash='dash'), 
-                            fill='tonexty', fillcolor='rgba(255,0,0,0.1)'), row=2, col=1)
-    
-    # RSI
-    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI', 
-                            line=dict(color='purple', width=2)), row=3, col=1)
-    fig.add_hline(y=70, line_dash="dash", line_color="red", 
-                  annotation_text="Overbought (70)", row=3, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", 
-                  annotation_text="Oversold (30)", row=3, col=1)
-    
-    fig.update_layout(height=900, template="plotly_white", 
-                     title="ENB Stock: Technical Analysis Indicators")
-    
-    return fig
-
-def create_dividend_analysis(df):
-    """Analyze dividend patterns and yield"""
-    # This is a simplified version - you might need actual dividend data
-    # For now, we'll estimate based on typical ENB dividend patterns
-    
-    # Create quarterly dividend estimates (ENB typically pays quarterly)
-    quarterly_dates = pd.date_range(start=df.index.min(), end=df.index.max(), freq='Q')
-    
-    fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=('Stock Price vs Estimated Dividend Yield', 'Investment Value Growth'),
-        vertical_spacing=0.15
-    )
-    
-    # Estimated dividend yield (inverse relationship with price)
-    df['Est_Dividend_Yield'] = 50 / df['Close']  # Simplified estimation
-    
-    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Stock Price ($)', 
-                            yaxis='y1', line=dict(color='blue', width=2)), row=1, col=1)
-    
-    # Add secondary y-axis for dividend yield
-    fig.add_trace(go.Scatter(x=df.index, y=df['Est_Dividend_Yield'], 
-                            name='Est. Dividend Yield (%)', 
-                            line=dict(color='green', width=2), yaxis='y2'), row=1, col=1)
-    
-    # Investment growth simulation
-    initial_investment = 10000
-    df['Investment_Value'] = initial_investment * (df['Close'] / df['Close'].iloc[0])
-    
-    fig.add_trace(go.Scatter(x=df.index, y=df['Investment_Value'], 
-                            name='$10,000 Investment Value', 
-                            line=dict(color='gold', width=2)), row=2, col=1)
-    
-    fig.update_layout(height=600, template="plotly_white", 
-                     title="ENB Stock: Dividend Analysis and Investment Growth")
-    
-    # Update y-axes
-    fig.update_yaxes(title_text="Stock Price ($)", row=1, col=1)
-    fig.update_yaxes(title_text="Investment Value ($)", row=2, col=1)
-    
-    return fig
-
-def create_risk_analysis(df):
-    """Analyze risk metrics and drawdowns"""
-    # Calculate returns
-    df['Daily_Return'] = df['Close'].pct_change()
-    df['Cumulative_Return'] = (1 + df['Daily_Return']).cumprod() - 1
-    
-    # Calculate drawdown
-    rolling_max = df['Close'].expanding().max()
-    df['Drawdown'] = (df['Close'] - rolling_max) / rolling_max * 100
-    
-    # Risk metrics
-    annual_return = df['Daily_Return'].mean() * 252 * 100
-    annual_volatility = df['Daily_Return'].std() * np.sqrt(252) * 100
-    sharpe_ratio = annual_return / annual_volatility if annual_volatility > 0 else 0
-    
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=('Cumulative Returns', 'Drawdown Analysis', 
-                       'Risk-Return Profile', 'Return Distribution'),
-        specs=[[{"type": "scatter"}, {"type": "scatter"}],
-               [{"type": "scatter"}, {"type": "histogram"}]]
-    )
-    
-    # Cumulative Returns
-    fig.add_trace(go.Scatter(x=df.index, y=df['Cumulative_Return'] * 100, 
-                            name='Cumulative Return (%)', 
-                            line=dict(color='green', width=2)), row=1, col=1)
-    
-    # Drawdown
-    fig.add_trace(go.Scatter(x=df.index, y=df['Drawdown'], 
-                            name='Drawdown (%)', 
-                            line=dict(color='red', width=2), 
-                            fill='tozeroy', fillcolor='rgba(255,0,0,0.3)'), row=1, col=2)
-    
-    # Risk-Return scatter (rolling windows)
-    window = 252  # 1 year
-    rolling_returns = df['Daily_Return'].rolling(window).mean() * 252 * 100
-    rolling_volatility = df['Daily_Return'].rolling(window).std() * np.sqrt(252) * 100
-    
-    fig.add_trace(go.Scatter(x=rolling_volatility, y=rolling_returns, 
-                            mode='markers', name='Risk-Return Profile',
-                            marker=dict(size=6, opacity=0.6, color='blue')), row=2, col=1)
-    
-    # Return Distribution
-    fig.add_trace(go.Histogram(x=df['Daily_Return'] * 100, nbinsx=50, 
-                              name='Daily Returns (%)', marker_color='purple'), row=2, col=2)
-    
-    fig.update_layout(height=800, template="plotly_white", 
-                     title=f"ENB Stock: Risk Analysis (Sharpe Ratio: {sharpe_ratio:.2f})")
-    
-    return fig, annual_return, annual_volatility, sharpe_ratio
-
-def create_investment_insights(df):
-    """Generate actionable investment insights"""
-    # Calculate key metrics
-    df['Daily_Return'] = df['Close'].pct_change()
-    recent_price = df['Close'].iloc[-1]
-    avg_price_1y = df['Close'].tail(252).mean()
-    volatility_30d = df['Close'].pct_change().tail(30).std() * np.sqrt(252) * 100
-    
-    # Best/worst months
-    df['Month'] = df.index.month
-    monthly_returns = df.groupby('Month')['Daily_Return'].mean() * 100
-    best_month = monthly_returns.idxmax()
-    worst_month = monthly_returns.idxmin()
-    
-    # Recent performance
-    performance_1m = ((df['Close'].iloc[-1] - df['Close'].iloc[-21]) / df['Close'].iloc[-21]) * 100
-    performance_3m = ((df['Close'].iloc[-1] - df['Close'].iloc[-63]) / df['Close'].iloc[-63]) * 100
-    performance_1y = ((df['Close'].iloc[-1] - df['Close'].iloc[-252]) / df['Close'].iloc[-252]) * 100
-    
-    insights = {
-        'current_price': recent_price,
-        'vs_1y_avg': ((recent_price - avg_price_1y) / avg_price_1y) * 100,
-        'volatility_30d': volatility_30d,
-        'best_month': best_month,
-        'worst_month': worst_month,
-        'perf_1m': performance_1m,
-        'perf_3m': performance_3m,
-        'perf_1y': performance_1y,
-        'avg_daily_volume': df['Volume'].tail(30).mean(),
-        'price_trend': 'Upward' if df['Close'].tail(10).mean() > df['Close'].tail(20).mean() else 'Downward'
-    }
-    
-    return insights
-
-# ============= END OF NEW EDA FUNCTIONS =============
 
 def analyze_class_balance(y):
     """Analyze class distribution and determine best resampling strategy"""
@@ -549,6 +715,440 @@ def create_correlation_heatmap(df):
     fig.update_layout(height=600, width=800)
     return fig
 
+def create_time_series_plot(df, feature):
+    """Create time series plot for selected feature"""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df.index, 
+        y=df[feature],
+        mode='lines',
+        name=feature,
+        line=dict(color='#1f77b4', width=2)
+    ))
+    
+    fig.update_layout(
+        title=f"Time Series: {feature}",
+        xaxis_title="Date",
+        yaxis_title=feature,
+        height=400,
+        template="plotly_white"
+    )
+    return fig
+
+def create_distribution_plot(df, feature):
+    """Create distribution plot for selected feature"""
+    fig = make_subplots(rows=1, cols=2, 
+                       subplot_titles=(f'{feature} Distribution', f'{feature} by Movement'))
+    
+    # Histogram
+    fig.add_trace(go.Histogram(x=df[feature], nbinsx=30, name='Distribution'), row=1, col=1)
+    
+    # Box plot by target
+    for target in df['Target'].unique():
+        data = df[df['Target'] == target][feature]
+        movement_type = 'Up Movement' if target == 1 else 'Down Movement'
+        fig.add_trace(go.Box(y=data, name=movement_type), row=1, col=2)
+    
+    fig.update_layout(height=400, template="plotly_white")
+    return fig
+
+# NEW FUNCTIONS FOR STOCK ANALYSIS PLOTS
+def create_candlestick_chart(df, title="ENB Stock Price Movement"):
+    """Create candlestick chart with volume"""
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.1,
+        row_heights=[0.7, 0.3],
+        subplot_titles=('Price Movement', 'Volume')
+    )
+    
+    # Candlestick chart
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df['Open'],
+        high=df['High'],
+        low=df['Low'],
+        close=df['Adjusted Close'],
+        name='Price'
+    ), row=1, col=1)
+    
+    # Volume chart
+    colors = ['green' if close >= open else 'red' for close, open in zip(df['Adjusted Close'], df['Open'])]
+    fig.add_trace(go.Bar(
+        x=df.index,
+        y=df['Volume'],
+        name='Volume',
+        marker_color=colors,
+        opacity=0.7
+    ), row=2, col=1)
+    
+    fig.update_layout(
+        title=title,
+        xaxis_rangeslider_visible=False,
+        height=600,
+        template="plotly_white"
+    )
+    
+    return fig
+
+def create_yearly_performance_plot(df):
+    """Analyze yearly performance and trends"""
+    df_copy = df.copy()
+    df_copy['Year'] = df_copy.index.year
+    df_copy['Month'] = df_copy.index.month
+    
+    # Calculate yearly returns
+    yearly_data = []
+    for year in df_copy['Year'].unique():
+        year_data = df_copy[df_copy['Year'] == year]
+        if len(year_data) > 0:
+            start_price = year_data['Adjusted Close'].iloc[0]
+            end_price = year_data['Adjusted Close'].iloc[-1]
+            yearly_return = ((end_price - start_price) / start_price) * 100
+            yearly_data.append({
+                'Year': year,
+                'Return (%)': yearly_return,
+                'Start Price': start_price,
+                'End Price': end_price,
+                'High': year_data['High'].max(),
+                'Low': year_data['Low'].min()
+            })
+    
+    yearly_df = pd.DataFrame(yearly_data)
+    
+    fig = px.bar(
+        yearly_df,
+        x='Year',
+        y='Return (%)',
+        title="Yearly Returns Analysis",
+        color='Return (%)',
+        color_continuous_scale='RdYlGn',
+        text='Return (%)'
+    )
+    fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+    fig.update_layout(height=500, template="plotly_white")
+    
+    return fig, yearly_df
+
+def create_monthly_seasonality_plot(df):
+    """Analyze monthly seasonality patterns"""
+    df_copy = df.copy()
+    df_copy['Month'] = df_copy.index.month
+    df_copy['MonthName'] = df_copy.index.strftime('%B')
+    
+    # Calculate monthly average returns
+    monthly_returns = []
+    for month in range(1, 13):
+        month_data = df_copy[df_copy['Month'] == month]
+        if len(month_data) > 1:
+            returns = month_data['Adjusted Close'].pct_change().dropna() * 100
+            avg_return = returns.mean()
+            monthly_returns.append({
+                'Month': month,
+                'MonthName': month_data['MonthName'].iloc[0],
+                'Avg Return (%)': avg_return,
+                'Volatility (%)': returns.std()
+            })
+    
+    monthly_df = pd.DataFrame(monthly_returns)
+    
+    fig = px.bar(
+        monthly_df,
+        x='MonthName',
+        y='Avg Return (%)',
+        title="Monthly Seasonality - Average Returns by Month",
+        color='Avg Return (%)',
+        color_continuous_scale='RdYlGn',
+        text='Avg Return (%)'
+    )
+    fig.update_traces(texttemplate='%{text:.2f}%', textposition='outside')
+    fig.update_layout(height=400, template="plotly_white")
+    
+    return fig, monthly_df
+
+def create_volatility_analysis_plot(df):
+    """Analyze price volatility over time"""
+    df_copy = df.copy()
+    # Calculate rolling volatility (30-day)
+    df_copy['Daily Returns'] = df_copy['Adjusted Close'].pct_change()
+    df_copy['Volatility (30d)'] = df_copy['Daily Returns'].rolling(window=30).std() * np.sqrt(252) * 100  # Annualized
+    
+    fig = go.Figure()
+    
+    # Price on secondary y-axis
+    fig.add_trace(go.Scatter(
+        x=df_copy.index,
+        y=df_copy['Adjusted Close'],
+        name='Price ($)',
+        line=dict(color='blue', width=2),
+        yaxis='y2'
+    ))
+    
+    # Volatility on primary y-axis
+    fig.add_trace(go.Scatter(
+        x=df_copy.index,
+        y=df_copy['Volatility (30d)'],
+        name='Volatility (%)',
+        line=dict(color='red', width=2),
+        fill='tonexty'
+    ))
+    
+    fig.update_layout(
+        title="Price vs Volatility Analysis",
+        xaxis_title="Date",
+        yaxis=dict(title="Volatility (%)", side="left"),
+        yaxis2=dict(title="Price ($)", side="right", overlaying="y"),
+        height=500,
+        template="plotly_white"
+    )
+    
+    return fig
+
+def create_support_resistance_plot(df, window=20):
+    """Identify support and resistance levels"""
+    df_copy = df.copy()
+    
+    # Calculate moving averages
+    df_copy['MA20'] = df_copy['Adjusted Close'].rolling(window=20).mean()
+    df_copy['MA50'] = df_copy['Adjusted Close'].rolling(window=50).mean()
+    df_copy['MA200'] = df_copy['Adjusted Close'].rolling(window=200).mean()
+    
+    # Calculate Bollinger Bands
+    df_copy['BB_upper'] = df_copy['MA20'] + (df_copy['Adjusted Close'].rolling(window=20).std() * 2)
+    df_copy['BB_lower'] = df_copy['MA20'] - (df_copy['Adjusted Close'].rolling(window=20).std() * 2)
+    
+    fig = go.Figure()
+    
+    # Price
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['Adjusted Close'],
+        mode='lines', name='Price', line=dict(color='black', width=2)
+    ))
+    
+    # Moving averages
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['MA20'],
+        mode='lines', name='MA20', line=dict(color='blue', width=1)
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['MA50'],
+        mode='lines', name='MA50', line=dict(color='orange', width=1)
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['MA200'],
+        mode='lines', name='MA200', line=dict(color='red', width=1)
+    ))
+    
+    # Bollinger Bands
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['BB_upper'],
+        mode='lines', name='BB Upper', line=dict(color='gray', dash='dash')
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['BB_lower'],
+        mode='lines', name='BB Lower', line=dict(color='gray', dash='dash'),
+        fill='tonexty', fillcolor='rgba(128,128,128,0.1)'
+    ))
+    
+    fig.update_layout(
+        title="Support & Resistance Levels (Moving Averages & Bollinger Bands)",
+        xaxis_title="Date",
+        yaxis_title="Price ($)",
+        height=600,
+        template="plotly_white"
+    )
+    
+    return fig
+
+def create_buy_sell_signals_plot(df):
+    """Generate buy/sell signals based on technical indicators"""
+    df_copy = df.copy()
+    
+    # Calculate technical indicators
+    df_copy['MA20'] = df_copy['Adjusted Close'].rolling(window=20).mean()
+    df_copy['MA50'] = df_copy['Adjusted Close'].rolling(window=50).mean()
+    
+    # Simple moving average crossover strategy
+    df_copy['Signal'] = 0
+    df_copy['Signal'][20:] = np.where(df_copy['MA20'][20:] > df_copy['MA50'][20:], 1, 0)
+    df_copy['Position'] = df_copy['Signal'].diff()
+    
+    # Identify buy and sell points
+    buy_signals = df_copy[df_copy['Position'] == 1]
+    sell_signals = df_copy[df_copy['Position'] == -1]
+    
+    fig = go.Figure()
+    
+    # Price line
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['Adjusted Close'],
+        mode='lines', name='Price', line=dict(color='black', width=2)
+    ))
+    
+    # Moving averages
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['MA20'],
+        mode='lines', name='MA20', line=dict(color='blue', width=1)
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['MA50'],
+        mode='lines', name='MA50', line=dict(color='red', width=1)
+    ))
+    
+    # Buy signals
+    fig.add_trace(go.Scatter(
+        x=buy_signals.index, y=buy_signals['Adjusted Close'],
+        mode='markers', name='Buy Signal',
+        marker=dict(symbol='triangle-up', size=12, color='green')
+    ))
+    
+    # Sell signals
+    fig.add_trace(go.Scatter(
+        x=sell_signals.index, y=sell_signals['Adjusted Close'],
+        mode='markers', name='Sell Signal',
+        marker=dict(symbol='triangle-down', size=12, color='red')
+    ))
+    
+    fig.update_layout(
+        title="Buy/Sell Signals (MA20 vs MA50 Crossover)",
+        xaxis_title="Date",
+        yaxis_title="Price ($)",
+        height=600,
+        template="plotly_white"
+    )
+    
+    return fig, buy_signals, sell_signals
+
+def create_risk_return_analysis(df):
+    """Analyze risk vs return for different holding periods"""
+    holding_periods = [30, 90, 180, 365]  # days
+    risk_return_data = []
+    
+    for period in holding_periods:
+        returns = df['Adjusted Close'].pct_change(period).dropna() * 100
+        avg_return = returns.mean()
+        volatility = returns.std()
+        sharpe_ratio = avg_return / volatility if volatility != 0 else 0
+        
+        risk_return_data.append({
+            'Holding Period (Days)': period,
+            'Average Return (%)': avg_return,
+            'Volatility (%)': volatility,
+            'Sharpe Ratio': sharpe_ratio
+        })
+    
+    risk_return_df = pd.DataFrame(risk_return_data)
+    
+    fig = px.scatter(
+        risk_return_df,
+        x='Volatility (%)',
+        y='Average Return (%)',
+        size='Sharpe Ratio',
+        color='Holding Period (Days)',
+        title="Risk vs Return Analysis (Different Holding Periods)",
+        hover_data=['Holding Period (Days)', 'Sharpe Ratio']
+    )
+    
+    fig.update_layout(height=500, template="plotly_white")
+    
+    return fig, risk_return_df
+
+def create_drawdown_analysis(df):
+    """Analyze maximum drawdowns"""
+    df_copy = df.copy()
+    
+    # Calculate rolling maximum and drawdown
+    df_copy['Rolling Max'] = df_copy['Adjusted Close'].expanding().max()
+    df_copy['Drawdown'] = ((df_copy['Adjusted Close'] - df_copy['Rolling Max']) / df_copy['Rolling Max']) * 100
+    
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.1,
+        subplot_titles=('Price with All-Time High', 'Drawdown from Peak (%)')
+    )
+    
+    # Price and all-time high
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['Adjusted Close'],
+        name='Price', line=dict(color='blue')
+    ), row=1, col=1)
+    
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['Rolling Max'],
+        name='All-Time High', line=dict(color='green', dash='dash')
+    ), row=1, col=1)
+    
+    # Drawdown
+    fig.add_trace(go.Scatter(
+        x=df_copy.index, y=df_copy['Drawdown'],
+        name='Drawdown', fill='tonexty', line=dict(color='red')
+    ), row=2, col=1)
+    
+    fig.update_layout(
+        title="Drawdown Analysis - When to Buy the Dip",
+        height=600,
+        template="plotly_white"
+    )
+    
+    return fig, df_copy['Drawdown'].min()
+
+def create_price_distribution_analysis(df):
+    """Analyze price distribution and identify value zones"""
+    current_price = df['Adjusted Close'].iloc[-1]
+    
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('Price Distribution', 'Price Percentiles')
+    )
+    
+    # Price histogram
+    fig.add_trace(go.Histogram(
+        x=df['Adjusted Close'],
+        nbinsx=50,
+        name='Price Distribution',
+        opacity=0.7
+    ), row=1, col=1)
+    
+    # Add current price line
+    fig.add_vline(
+        x=current_price,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=f"Current: ${current_price:.2f}",
+        row=1, col=1
+    )
+    
+    # Price percentiles
+    percentiles = np.percentile(df['Adjusted Close'], [10, 25, 50, 75, 90])
+    labels = ['10th', '25th', '50th (Median)', '75th', '90th']
+    
+    fig.add_trace(go.Bar(
+        x=labels,
+        y=percentiles,
+        name='Price Percentiles',
+        text=[f'${p:.2f}' for p in percentiles],
+        textposition='auto'
+    ), row=1, col=2)
+    
+    # Add current price line to percentiles
+    fig.add_hline(
+        y=current_price,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=f"Current: ${current_price:.2f}",
+        row=1, col=2
+    )
+    
+    fig.update_layout(height=500, template="plotly_white")
+    
+    # Calculate insights
+    current_percentile = (df['Adjusted Close'] < current_price).mean() * 100
+    
+    return fig, current_percentile, percentiles
+
+# [Previous functions remain the same - train_model, run_automl_optimization, etc.]
 def train_model(X_train, X_test, y_train, y_test, model_name, model, resampling_method='auto', use_class_weights=True):
     """Train a single model with robust resampling and error handling"""
     try:
@@ -633,7 +1233,7 @@ def run_automl_optimization(X_train, X_test, y_train, y_test, model_type, metric
                     max_depth=max_depth,
                     min_samples_split=min_samples_split,
                     random_state=42,
-                    class_weight='balanced'
+                    class_weight='balanced'  # Always use balanced class weights in AutoML
                 )
             elif model_type == "Gradient Boosting":
                 n_estimators = trial.suggest_int('n_estimators', 50, 200)
@@ -800,299 +1400,348 @@ with st.sidebar:
     # Tool Description
     st.subheader("📈 About This Tool")
     st.markdown("""
-    **ENB Stock Analysis Dashboard** provides comprehensive analysis and machine learning predictions for Enbridge Inc. (ENB) stock.
+    **ENB Stock Analysis & Prediction Dashboard** helps you analyze Enbridge Inc. (ENB) stock data and build ML models for predicting price movements.
     
-    🔄 **Process:** Explore data → Understand patterns → Train models → Make decisions
+    🔄 **Process:** Explore stock data → Analyze patterns → Train models → Make predictions
     """)
     
     st.markdown("---")
     
     # Use Cases
-    st.subheader("💼 Investment Strategies")
+    st.subheader("💼 Key Use Cases")
     
     with st.expander("🛡️ Conservative Investor", expanded=True):
         st.markdown("""
-        **Focus: Capital Preservation**
+        **Focus: High Precision**
         
-        • Look for low volatility periods
-        • Focus on dividend yield patterns  
-        • Avoid investing during high drawdown periods
-        • Use technical indicators for entry/exit points
+        • Minimize false positives (avoid bad investments)
+        • Prefer models with 80%+ precision
+        • Better to miss opportunities than lose money
+        • Use SVM or Logistic Regression for interpretability
         """)
     
     with st.expander("🚀 Growth Investor"):
         st.markdown("""
-        **Focus: Capital Appreciation**
+        **Focus: High Recall**
         
-        • Identify seasonal patterns for timing
-        • Look for breakout patterns in technical analysis
-        • Focus on periods of positive momentum
-        • Use predictive models for trend following
+        • Capture most growth opportunities
+        • Don't mind some false positives
+        • Prefer models with 75%+ recall
+        • Use Random Forest or Gradient Boosting
         """)
     
-    with st.expander("⚖️ Income Investor"):
+    with st.expander("⚖️ Balanced Trader"):
         st.markdown("""
-        **Focus: Dividend Income**
+        **Focus: High F1-Score**
         
-        • Monitor dividend yield vs stock price
-        • Look for price drops with stable dividends
-        • Understand seasonal dividend patterns
-        • Balance yield with capital preservation
+        • Balance between precision and recall
+        • Optimize overall model performance
+        • Use AutoML for best parameter tuning
+        • Compare multiple models systematically
         """)
     
     st.markdown("---")
-    st.markdown("*💡 Use the analysis plots to understand when to buy, hold, or sell ENB stock.*")
+    st.markdown("*💡 Choose your strategy based on your risk tolerance and investment goals.*")
 
 # Load data
-if st.session_state.data is None or st.session_state.raw_data is None:
-    with st.spinner("Loading ENB stock data..."):
-        st.session_state.raw_data, st.session_state.data = load_data()
+if st.session_state.raw_data is None or st.session_state.data is None:
+    with st.spinner("Loading datasets..."):
+        raw_data, preprocessed_data = load_data()
+        st.session_state.raw_data = raw_data
+        st.session_state.data = preprocessed_data
 
-if st.session_state.data is None or st.session_state.raw_data is None:
+if st.session_state.raw_data is None or st.session_state.data is None:
     st.stop()
 
 raw_df = st.session_state.raw_data
 df = st.session_state.data
 
-# Main tabs - UPDATED with new Stock Analysis tab
+# Main tabs - ADDING THE NEW STOCK ANALYSIS TAB
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Stock Analysis", "🔍 Data Explorer", "🤖 Model Lab", "📈 Performance Center"])
 
-# NEW TAB 1: Stock Analysis (EDA Plots)
+# NEW TAB 1: STOCK ANALYSIS
 with tab1:
-    st.header("📊 ENB Stock Market Analysis")
-    st.markdown("*Understanding ENB stock patterns for smarter investment decisions*")
+    st.header("📊 ENB Stock Analysis - Investment Insights")
     
-    # Investment insights overview
-    insights = create_investment_insights(raw_df)
-    
-    # Key metrics row
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    with col1:
-        st.metric("Current Price", f"${insights['current_price']:.2f}")
-    with col2:
-        delta_color = "normal" if insights['vs_1y_avg'] >= 0 else "inverse"
-        st.metric("vs 1Y Avg", f"{insights['vs_1y_avg']:+.1f}%")
-    with col3:
-        st.metric("30D Volatility", f"{insights['volatility_30d']:.1f}%")
-    with col4:
-        st.metric("1M Return", f"{insights['perf_1m']:+.1f}%")
-    with col5:
-        st.metric("1Y Return", f"{insights['perf_1y']:+.1f}%")
-    
-    # Investment insights
-    with st.expander("💡 Key Investment Insights", expanded=True):
-        month_names = ['', 'January', 'February', 'March', 'April', 'May', 'June', 
-                      'July', 'August', 'September', 'October', 'November', 'December']
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown(f"""
-            <div class="insight-box">
-            <h4>📅 Best Time to Invest</h4>
-            <p><strong>Best Month:</strong> {month_names[insights['best_month']]}</p>
-            <p><strong>Worst Month:</strong> {month_names[insights['worst_month']]}</p>
-            <p><strong>Current Trend:</strong> {insights['price_trend']}</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            volatility_status = "Low" if insights['volatility_30d'] < 15 else "High" if insights['volatility_30d'] > 25 else "Medium"
-            price_status = "Attractive" if insights['vs_1y_avg'] < -5 else "Expensive" if insights['vs_1y_avg'] > 10 else "Fair"
-            
-            st.markdown(f"""
-            <div class="insight-box">
-            <h4>🎯 Investment Recommendation</h4>
-            <p><strong>Price Level:</strong> {price_status}</p>
-            <p><strong>Volatility:</strong> {volatility_status}</p>
-            <p><strong>Avg Daily Volume:</strong> {insights['avg_daily_volume']:,.0f}</p>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # Plot 1: Price Overview
-    st.subheader("1. 📈 ENB Stock Price Overview & Trading Volume")
-    fig1 = create_price_overview_plot(raw_df)
-    st.plotly_chart(fig1, use_container_width=True)
-    
-    with st.expander("💡 What this tells investors"):
-        st.markdown("""
-        - **Price Trends**: Look for long-term upward trends for growth potential
-        - **Volume Spikes**: High volume often indicates important price movements
-        - **Support/Resistance**: Identify price levels where stock tends to bounce
-        - **Investment Timing**: Buy during dips if long-term trend is positive
-        """)
-    
-    # Plot 2: Distribution Analysis  
-    st.subheader("2. 📊 Price & Returns Distribution Analysis")
-    fig2 = create_price_distribution_analysis(raw_df)
-    st.plotly_chart(fig2, use_container_width=True)
-    
-    with st.expander("💡 What this tells investors"):
-        st.markdown("""
-        - **Price Distribution**: Shows the most common price ranges for ENB
-        - **Return Distribution**: Normal bell curve suggests predictable returns
-        - **Price vs Volume**: High volume at certain prices indicates strong support/resistance
-        - **Monthly Patterns**: Some months consistently show better/worse performance
-        """)
-    
-    # Plot 3: Volatility Analysis
-    st.subheader("3. ⚡ Volatility Analysis - Risk Assessment")
-    fig3 = create_volatility_analysis(raw_df)
-    st.plotly_chart(fig3, use_container_width=True)
-    
-    with st.expander("💡 What this tells investors"):
-        st.markdown("""
-        - **Low Volatility Periods**: Better for conservative investors and new positions
-        - **High Volatility Periods**: Potential opportunities but higher risk
-        - **Daily Range**: Shows how much the stock moves daily - important for day traders
-        - **Investment Strategy**: Buy during low volatility, be cautious during high volatility
-        """)
-    
-    # Plot 4: Seasonal Analysis
-    st.subheader("4. 🗓️ Seasonal Investment Patterns")
-    fig4 = create_seasonal_analysis(raw_df)
-    st.plotly_chart(fig4, use_container_width=True)
-    
-    with st.expander("💡 What this tells investors"):
-        st.markdown(f"""
-        - **Best Month**: {month_names[insights['best_month']]} historically shows strongest returns
-        - **Worst Month**: {month_names[insights['worst_month']]} typically shows weakest performance  
-        - **Quarterly Patterns**: Some quarters consistently outperform others
-        - **Day of Week**: Some days of the week show better average returns
-        - **Strategy**: Time your investments based on historical seasonal patterns
-        """)
-    
-    # Plot 5: Technical Analysis
-    st.subheader("5. 📊 Technical Analysis - Buy/Sell Signals")
-    fig5 = create_technical_indicators_analysis(raw_df)
-    st.plotly_chart(fig5, use_container_width=True)
-    
-    with st.expander("💡 What this tells investors"):
-        st.markdown("""
-        - **Moving Averages**: When price is above all MAs, it's bullish; below all MAs is bearish
-        - **Bollinger Bands**: Price near upper band may be overbought; near lower band may be oversold
-        - **RSI Indicator**: Above 70 = potentially overbought (sell signal); Below 30 = potentially oversold (buy signal)
-        - **Strategy**: Use these indicators to time your entry and exit points
-        """)
-    
-    # Plot 6: Dividend Analysis
-    st.subheader("6. 💰 Dividend Analysis & Investment Growth")
-    fig6 = create_dividend_analysis(raw_df)
-    st.plotly_chart(fig6, use_container_width=True)
-    
-    with st.expander("💡 What this tells investors"):
-        st.markdown("""
-        - **Dividend Yield**: Higher yield when stock price is lower (better value)
-        - **Investment Growth**: Shows how $10,000 invested would have grown
-        - **Income Strategy**: ENB is known for reliable quarterly dividends
-        - **Timing**: Buy when dividend yield is high (stock price relatively low)
-        """)
-    
-    # Plot 7: Risk Analysis  
-    st.subheader("7. ⚠️ Risk Analysis - Maximum Drawdowns")
-    fig7, annual_return, annual_vol, sharpe = create_risk_analysis(raw_df)
-    st.plotly_chart(fig7, use_container_width=True)
-    
-    # Risk metrics
+    # Current stock overview
     col1, col2, col3, col4 = st.columns(4)
+    
+    current_price = raw_df['Adjusted Close'].iloc[-1]
+    prev_price = raw_df['Adjusted Close'].iloc[-2]
+    price_change = current_price - prev_price
+    price_change_pct = (price_change / prev_price) * 100
+    
     with col1:
-        st.metric("Annual Return", f"{annual_return:.1f}%")
+        st.metric(
+            "Current Price", 
+            f"${current_price:.2f}",
+            delta=f"{price_change_pct:.2f}%"
+        )
+    
     with col2:
-        st.metric("Annual Volatility", f"{annual_vol:.1f}%")  
+        year_high = raw_df['High'].tail(252).max()  # Last year high
+        st.metric("52W High", f"${year_high:.2f}")
+    
     with col3:
-        st.metric("Sharpe Ratio", f"{sharpe:.2f}")
+        year_low = raw_df['Low'].tail(252).min()  # Last year low
+        st.metric("52W Low", f"${year_low:.2f}")
+    
     with col4:
-        risk_level = "Low" if annual_vol < 20 else "High" if annual_vol > 30 else "Medium"
-        st.metric("Risk Level", risk_level)
+        avg_volume = raw_df['Volume'].tail(30).mean()
+        st.metric("Avg Volume (30d)", f"{avg_volume:,.0f}")
     
-    with st.expander("💡 What this tells investors"):
-        st.markdown(f"""
-        - **Drawdown Analysis**: Shows the maximum loss from peak to trough  
-        - **Risk-Return Profile**: ENB shows {risk_level.lower()} risk with {annual_return:.1f}% annual returns
-        - **Sharpe Ratio**: {sharpe:.2f} indicates risk-adjusted performance ({'Good' if sharpe > 1 else 'Fair' if sharpe > 0.5 else 'Poor'})
-        - **Strategy**: Understand maximum potential losses before investing
-        """)
+    # Analysis Plot 1: Candlestick with Volume
+    st.subheader("📈 Plot 1: Price Movement with Volume Analysis")
     
-    # Investment Decision Framework
-    st.subheader("8. 🎯 Investment Decision Framework")
+    # Date range selector
+    col1, col2 = st.columns(2)
+    with col1:
+        years_back = st.selectbox("Select Time Period", [1, 2, 5, 10, "All Data"], index=2)
     
-    # Create decision matrix
+    if years_back == "All Data":
+        plot_data = raw_df
+    else:
+        start_date = raw_df.index[-1] - timedelta(days=years_back*365)
+        plot_data = raw_df[raw_df.index >= start_date]
+    
+    fig_candle = create_candlestick_chart(plot_data, "ENB Stock Price Movement with Volume")
+    st.plotly_chart(fig_candle, use_container_width=True)
+    
+    st.markdown("""
+    <div class="insight-box">
+    <strong>💡 Investment Insight:</strong> Green volume bars indicate buying pressure during price increases, 
+    while red bars show selling pressure. High volume during price movements confirms trend strength.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Analysis Plot 2: Yearly Performance
+    st.subheader("📊 Plot 2: Yearly Performance Analysis")
+    fig_yearly, yearly_df = create_yearly_performance_plot(plot_data)
+    st.plotly_chart(fig_yearly, use_container_width=True)
+    
+    # Show best and worst years
+    best_year = yearly_df.loc[yearly_df['Return (%)'].idxmax()]
+    worst_year = yearly_df.loc[yearly_df['Return (%)'].idxmin()]
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.success(f"🏆 **Best Year:** {best_year['Year']} with {best_year['Return (%)']:.1f}% return")
+    with col2:
+        st.error(f"📉 **Worst Year:** {worst_year['Year']} with {worst_year['Return (%)']:.1f}% return")
+    
+    # Analysis Plot 3: Monthly Seasonality
+    st.subheader("📅 Plot 3: Monthly Seasonality - When to Invest")
+    fig_monthly, monthly_df = create_monthly_seasonality_plot(plot_data)
+    st.plotly_chart(fig_monthly, use_container_width=True)
+    
+    best_month = monthly_df.loc[monthly_df['Avg Return (%)'].idxmax()]
+    worst_month = monthly_df.loc[monthly_df['Avg Return (%)'].idxmin()]
+    
+    st.markdown(f"""
+    <div class="insight-box">
+    <strong>💡 Seasonality Insight:</strong><br>
+    • <strong>Best Month to Invest:</strong> {best_month['MonthName']} (Avg: {best_month['Avg Return (%)']:.2f}%)<br>
+    • <strong>Worst Month:</strong> {worst_month['MonthName']} (Avg: {worst_month['Avg Return (%)']:.2f}%)<br>
+    • Consider dollar-cost averaging during historically weaker months
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Analysis Plot 4: Volatility Analysis
+    st.subheader("⚡ Plot 4: Price vs Volatility Analysis")
+    fig_vol = create_volatility_analysis_plot(plot_data)
+    st.plotly_chart(fig_vol, use_container_width=True)
+    
+    st.markdown("""
+    <div class="insight-box">
+    <strong>💡 Volatility Insight:</strong> High volatility periods (red spikes) often present both 
+    risk and opportunity. Consider reducing position size during high volatility or use it for 
+    strategic entry/exit points.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Analysis Plot 5: Support and Resistance Levels
+    st.subheader("📊 Plot 5: Support & Resistance Levels")
+    fig_support = create_support_resistance_plot(plot_data)
+    st.plotly_chart(fig_support, use_container_width=True)
+    
+    current_ma20 = plot_data['Adjusted Close'].rolling(20).mean().iloc[-1]
+    current_ma50 = plot_data['Adjusted Close'].rolling(50).mean().iloc[-1]
+    current_ma200 = plot_data['Adjusted Close'].rolling(200).mean().iloc[-1]
+    
+    st.markdown(f"""
+    <div class="insight-box">
+    <strong>💡 Technical Analysis:</strong><br>
+    • <strong>Current vs MA20:</strong> ${current_price:.2f} vs ${current_ma20:.2f} 
+    ({'Above' if current_price > current_ma20 else 'Below'} - {'Bullish' if current_price > current_ma20 else 'Bearish'} short-term)<br>
+    • <strong>Current vs MA200:</strong> ${current_price:.2f} vs ${current_ma200:.2f} 
+    ({'Above' if current_price > current_ma200 else 'Below'} - {'Bullish' if current_price > current_ma200 else 'Bearish'} long-term)<br>
+    • Price above moving averages suggests uptrend, below suggests downtrend
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Analysis Plot 6: Buy/Sell Signals
+    st.subheader("🎯 Plot 6: Buy/Sell Signal Analysis")
+    fig_signals, buy_signals, sell_signals = create_buy_sell_signals_plot(plot_data)
+    st.plotly_chart(fig_signals, use_container_width=True)
+    
+    if len(buy_signals) > 0 and len(sell_signals) > 0:
+        last_buy = buy_signals.index[-1] if len(buy_signals) > 0 else None
+        last_sell = sell_signals.index[-1] if len(sell_signals) > 0 else None
+        
+        if last_buy and last_sell:
+            if last_buy > last_sell:
+                signal_status = "BUY"
+                signal_color = "success"
+                last_signal_date = last_buy
+            else:
+                signal_status = "SELL" 
+                signal_color = "error"
+                last_signal_date = last_sell
+            
+            if signal_color == "success":
+                st.success(f"🎯 **Current Signal: {signal_status}** (Last signal: {last_signal_date.date()})")
+            else:
+                st.error(f"🎯 **Current Signal: {signal_status}** (Last signal: {last_signal_date.date()})")
+    
+    # Analysis Plot 7: Risk vs Return Analysis
+    st.subheader("⚖️ Plot 7: Risk vs Return for Different Holding Periods")
+    fig_risk, risk_df = create_risk_return_analysis(plot_data)
+    st.plotly_chart(fig_risk, use_container_width=True)
+    
+    # Show risk-return summary
+    st.dataframe(risk_df, use_container_width=True)
+    
+    best_sharpe = risk_df.loc[risk_df['Sharpe Ratio'].idxmax()]
+    st.markdown(f"""
+    <div class="insight-box">
+    <strong>💡 Optimal Holding Period:</strong> {best_sharpe['Holding Period (Days)']} days shows the best 
+    risk-adjusted returns (Sharpe Ratio: {best_sharpe['Sharpe Ratio']:.3f}). 
+    This suggests the optimal investment horizon for ENB stock.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Analysis Plot 8: Drawdown Analysis - When to Buy the Dip
+    st.subheader("📉 Plot 8: Drawdown Analysis - When to Buy the Dip")
+    fig_drawdown, max_drawdown = create_drawdown_analysis(plot_data)
+    st.plotly_chart(fig_drawdown, use_container_width=True)
+    
+    st.markdown(f"""
+    <div class="insight-box">
+    <strong>💡 Dip Buying Strategy:</strong><br>
+    • <strong>Maximum Drawdown:</strong> {max_drawdown:.1f}% (worst decline from peak)<br>
+    • Drawdowns of 10-15% often present good buying opportunities<br>
+    • Drawdowns above 20% may indicate fundamental changes requiring analysis<br>
+    • Current drawdown helps assess if stock is "oversold" or "overbought"
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Analysis Plot 9: Price Distribution & Value Zones
+    st.subheader("📊 Plot 9: Price Distribution & Value Assessment")
+    fig_dist, current_percentile, percentiles = create_price_distribution_analysis(plot_data)
+    st.plotly_chart(fig_dist, use_container_width=True)
+    
+    # Value assessment
+    if current_percentile < 25:
+        value_assessment = "Potentially Undervalued"
+        value_color = "success"
+    elif current_percentile > 75:
+        value_assessment = "Potentially Overvalued"
+        value_color = "error"
+    else:
+        value_assessment = "Fairly Valued"
+        value_color = "info"
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if value_color == "success":
+            st.success(f"💰 **Value Assessment: {value_assessment}**")
+        elif value_color == "error":
+            st.error(f"💰 **Value Assessment: {value_assessment}**")
+        else:
+            st.info(f"💰 **Value Assessment: {value_assessment}**")
+            
+        st.metric("Current Price Percentile", f"{current_percentile:.1f}th percentile")
+    
+    with col2:
+        st.markdown("**Historical Price Levels:**")
+        st.text(f"90th Percentile (Expensive): ${percentiles[4]:.2f}")
+        st.text(f"75th Percentile: ${percentiles[3]:.2f}")
+        st.text(f"50th Percentile (Median): ${percentiles[2]:.2f}")
+        st.text(f"25th Percentile: ${percentiles[1]:.2f}")
+        st.text(f"10th Percentile (Cheap): ${percentiles[0]:.2f}")
+    
+    st.markdown(f"""
+    <div class="insight-box">
+    <strong>💡 Investment Recommendation:</strong><br>
+    • <strong>Current Position:</strong> {current_percentile:.1f}th percentile of historical prices<br>
+    • <strong>Strategy:</strong> {'Consider buying - price is in lower range' if current_percentile < 30 else 'Consider selling/holding - price is in upper range' if current_percentile > 70 else 'Neutral position - price is in middle range'}<br>
+    • Use this analysis alongside fundamental analysis for investment decisions
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Summary Investment Guidelines
+    st.subheader("📋 Investment Guidelines Summary")
+    
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("### 🟢 BUY Signals")
-        buy_signals = []
-        if insights['vs_1y_avg'] < -5:
-            buy_signals.append("✅ Price below 1-year average (value opportunity)")
-        if insights['volatility_30d'] < 20:
-            buy_signals.append("✅ Low volatility period (lower risk)")
-        if insights['perf_1m'] < -3:
-            buy_signals.append("✅ Recent decline (potential rebound)")
-        
-        # Technical signals (simplified)
-        current_rsi = 45  # Placeholder - you'd calculate this from actual RSI
-        if current_rsi < 40:
-            buy_signals.append("✅ RSI indicates oversold condition")
-        
-        if buy_signals:
-            for signal in buy_signals:
-                st.markdown(signal)
-        else:
-            st.markdown("⚠️ No strong buy signals currently")
+        st.markdown("""
+        ### 🟢 **When to BUY:**
+        - Price below 30th percentile (currently: {:.1f}th)
+        - Drawdown > 10-15% from recent highs
+        - Price below MA20 and MA50 (contrarian)
+        - High volatility creating opportunities
+        - Strong volume on price declines (capitulation)
+        """.format(current_percentile))
     
     with col2:
-        st.markdown("### 🔴 SELL/WAIT Signals")
-        sell_signals = []
-        if insights['vs_1y_avg'] > 15:
-            sell_signals.append("⚠️ Price well above 1-year average (overvalued)")
-        if insights['volatility_30d'] > 30:
-            sell_signals.append("⚠️ High volatility period (higher risk)")
-        if insights['perf_1m'] > 10:
-            sell_signals.append("⚠️ Large recent gains (potential pullback)")
-        
-        if current_rsi > 70:
-            sell_signals.append("⚠️ RSI indicates overbought condition")
-        
-        if sell_signals:
-            for signal in sell_signals:
-                st.markdown(signal)
-        else:
-            st.markdown("✅ No major sell signals currently")
+        st.markdown("""
+        ### 🔴 **When to SELL/HOLD:**
+        - Price above 75th percentile (currently: {:.1f}th)
+        - Multiple technical indicators overbought
+        - Price extended above moving averages
+        - Low volatility with declining volume
+        - Negative seasonal patterns approaching
+        """.format(current_percentile))
     
-    # Final recommendation
-    st.markdown("---")
-    buy_score = len(buy_signals) if 'buy_signals' in locals() else 0
-    sell_score = len(sell_signals) if 'sell_signals' in locals() else 0
-    
-    if buy_score > sell_score:
-        recommendation = "🟢 **CONSIDER BUYING** - Multiple positive signals present"
-        rec_color = "success"
-    elif sell_score > buy_score:
-        recommendation = "🔴 **HOLD/WAIT** - Some caution signals present"
-        rec_color = "warning"
+    # Final recommendation box
+    current_signals = []
+    if current_percentile < 25:
+        current_signals.append("✅ Price in lower 25% of range (Buy signal)")
+    elif current_percentile > 75:
+        current_signals.append("❌ Price in upper 25% of range (Sell signal)")
     else:
-        recommendation = "🟡 **NEUTRAL** - Mixed signals, wait for clearer trend"
-        rec_color = "info"
+        current_signals.append("➡️ Price in middle range (Neutral)")
+        
+    if current_price > current_ma20:
+        current_signals.append("✅ Above MA20 (Short-term bullish)")
+    else:
+        current_signals.append("❌ Below MA20 (Short-term bearish)")
+        
+    if current_price > current_ma200:
+        current_signals.append("✅ Above MA200 (Long-term bullish)")
+    else:
+        current_signals.append("❌ Below MA200 (Long-term bearish)")
     
-    st.markdown(f"""
-    <div class="alert alert-{rec_color}" role="alert">
-    <h4>🎯 Overall Investment Recommendation</h4>
-    <p>{recommendation}</p>
-    <p><small>Remember: This is based on historical data analysis. Always do your own research and consider your risk tolerance.</small></p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.subheader("🎯 Current Market Assessment")
+    for signal in current_signals:
+        if "✅" in signal:
+            st.success(signal)
+        elif "❌" in signal:
+            st.error(signal)
+        else:
+            st.info(signal)
 
-# TAB 2: Original Data Explorer (simplified)
+# EXISTING TABS (unchanged)
 with tab2:
-    st.header("🔍 Technical Data Explorer")
+    st.header("Data Explorer")
     
     col1, col2 = st.columns([2, 1])
     
     with col2:
         st.subheader("Dataset Overview")
-        st.info(f"**Raw Data Shape:** {raw_df.shape[0]} rows × {raw_df.shape[1]} columns")
-        st.info(f"**Processed Data Shape:** {df.shape[0]} rows × {df.shape[1]} columns")
-        st.info(f"**Date Range:** {raw_df.index.min().date()} to {raw_df.index.max().date()}")
+        st.info(f"**Shape:** {df.shape[0]} rows × {df.shape[1]} columns")
+        st.info(f"**Date Range:** {df.index.min().date()} to {df.index.max().date()}")
         
         # Class distribution analysis
         target_dist = df['Target'].value_counts()
@@ -1117,411 +1766,16 @@ with tab2:
         
         # Time series plot
         if selected_feature:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=df.index, 
-                y=df[selected_feature],
-                mode='lines',
-                name=selected_feature,
-                line=dict(color='#1f77b4', width=2)
-            ))
-            
-            fig.update_layout(
-                title=f"Time Series: {selected_feature}",
-                xaxis_title="Date",
-                yaxis_title=selected_feature,
-                height=400,
-                template="plotly_white"
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            fig_ts = create_time_series_plot(df, selected_feature)
+            st.plotly_chart(fig_ts, use_container_width=True)
+    
+    # Distribution analysis
+    st.subheader("Feature Distribution Analysis")
+    if selected_feature:
+        fig_dist = create_distribution_plot(df, selected_feature)
+        st.plotly_chart(fig_dist, use_container_width=True)
     
     # Correlation analysis
     st.subheader("Feature Correlation Analysis")
     fig_corr = create_correlation_heatmap(df)
     st.plotly_chart(fig_corr, use_container_width=True)
-    
-    # Show raw data preview
-    st.subheader("Raw OHLCV Data Preview")
-    st.dataframe(raw_df.head(10), use_container_width=True)
-    
-    st.subheader("Processed Features Data Preview")  
-    st.dataframe(df.head(10), use_container_width=True)
-
-# TAB 3: Model Lab (unchanged from original)
-with tab3:
-    st.header("🤖 Model Lab")
-    
-    col1, col2 = st.columns([3, 1])
-    
-    with col2:
-        st.subheader("Model Configuration")
-        
-        # Feature selection
-        feature_cols = [col for col in df.columns if col != 'Target']
-        selected_features = st.multiselect(
-            "Select Features",
-            feature_cols,
-            default=feature_cols[:5] if len(feature_cols) > 5 else feature_cols
-        )
-        
-        # Resampling strategy
-        resampling_options = {
-            "Auto (Robust)": "auto",
-            "SMOTE Only": "smote", 
-            "ADASYN Only": "adasyn",
-            "No Resampling": "none"
-        }
-        
-        resampling_method = st.selectbox(
-            "Class Balancing Strategy",
-            list(resampling_options.keys()),
-            index=0,
-            help="Auto mode tries multiple methods and falls back gracefully"
-        )
-        
-        # Model selection
-        available_models = {
-            "Logistic Regression": LogisticRegression(random_state=42, max_iter=1000),
-            "Random Forest": RandomForestClassifier(random_state=42, n_estimators=100),
-            "Gradient Boosting": GradientBoostingClassifier(random_state=42),
-            "SVM": SVC(probability=True, random_state=42),
-            "Naive Bayes": GaussianNB(),
-            "K-Nearest Neighbors": KNeighborsClassifier(n_neighbors=5)
-        }
-        
-        selected_models = st.multiselect(
-            "Select Models",
-            list(available_models.keys()),
-            default=["Logistic Regression", "Random Forest"],
-            help="Start with 1-2 models for faster training"
-        )
-        
-        # Advanced options
-        with st.expander("Advanced Options"):
-            use_class_weights = st.checkbox("Use Class Weights", value=True)
-            
-            # AutoML option
-            use_automl = st.checkbox("🚀 Use AutoML Optimization")
-            if use_automl:
-                n_trials = st.slider("AutoML Trials", 10, 100, 30)
-                automl_model = st.selectbox(
-                    "Model for AutoML",
-                    ["Random Forest", "Gradient Boosting", "SVM", "Logistic Regression"]
-                )
-                automl_metric = st.selectbox(
-                    "Optimization Metric",
-                    ["f1", "precision", "recall", "accuracy"]
-                )
-        
-        # Train models button
-        if st.button("🏋️ Train Models", type="primary"):
-            if selected_features and selected_models:
-                st.session_state.models_trained = True
-                st.session_state.model_results = {}
-    
-    with col1:
-        st.subheader("Training Results")
-        
-        if st.session_state.models_trained and selected_features:
-            # Prepare data
-            X = df[selected_features]
-            y = df['Target']
-            
-            # Check for data issues
-            if X.isnull().any().any():
-                st.warning("⚠️ Found missing values in features. Please clean your data.")
-                X = X.fillna(X.mean())
-            
-            # Train-test split (chronological)
-            split_index = int(len(df) * 0.8)
-            X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
-            y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
-            
-            # Display data split info
-            st.info(f"Training samples: {len(X_train)} | Test samples: {len(X_test)}")
-            
-            # Analyze class balance
-            train_balance = analyze_class_balance(y_train.values)
-            if train_balance['imbalance_ratio'] > 3:
-                st.warning(f"⚠️ High class imbalance detected (ratio: {train_balance['imbalance_ratio']:.2f})")
-            
-            # Scale features
-            try:
-                scaler = StandardScaler()
-                X_train_scaled = scaler.fit_transform(X_train)
-                X_test_scaled = scaler.transform(X_test)
-            except Exception as e:
-                st.error(f"Error scaling features: {str(e)}")
-                st.stop()
-            
-            # Progress tracking
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            results_container = st.container()
-            
-            total_models = len(selected_models) + (1 if use_automl else 0)
-            current_model = 0
-            
-            # Train regular models
-            for model_name in selected_models:
-                current_model += 1
-                status_text.text(f"Training {model_name} ({current_model}/{total_models})...")
-                
-                model = available_models[model_name]
-                result = train_model(
-                    X_train_scaled, X_test_scaled, y_train, y_test, 
-                    model_name, model, 
-                    resampling_options[resampling_method], 
-                    use_class_weights
-                )
-                
-                if result:
-                    st.session_state.model_results[model_name] = result
-                    with results_container:
-                        st.success(f"✅ {model_name} trained successfully")
-                        st.text(f"   • {result['resampling_info']}")
-                        st.text(f"   • Accuracy: {result['accuracy']:.3f}, F1: {result['f1_score']:.3f}")
-                else:
-                    with results_container:
-                        st.error(f"❌ {model_name} training failed")
-                
-                progress_bar.progress(current_model / total_models)
-            
-            # Train AutoML model if selected
-            if use_automl:
-                current_model += 1
-                status_text.text(f"Running AutoML for {automl_model} (optimizing {automl_metric.upper()})...")
-                
-                automl_result = run_automl_optimization(
-                    X_train_scaled, X_test_scaled, y_train, y_test, 
-                    automl_model, automl_metric, n_trials
-                )
-                
-                if automl_result:
-                    automl_key = f"{automl_model} (AutoML-{automl_metric.upper()})"
-                    st.session_state.model_results[automl_key] = automl_result
-                    with results_container:
-                        st.success(f"✅ AutoML {automl_model} completed")
-                        st.text(f"   • Best {automl_metric}: {automl_result['automl_best_score']:.3f}")
-                        st.text(f"   • Final F1: {automl_result['f1_score']:.3f}")
-                else:
-                    with results_container:
-                        st.error(f"❌ AutoML {automl_model} failed")
-                
-                progress_bar.progress(1.0)
-            
-            status_text.text("✅ Training completed!")
-            
-            # Display summary results
-            if st.session_state.model_results:
-                st.subheader("📊 Training Summary")
-                
-                results_data = []
-                for result in st.session_state.model_results.values():
-                    results_data.append({
-                        'Model': result['name'],
-                        'Accuracy': f"{result['accuracy']:.3f}",
-                        'F1-Score': f"{result['f1_score']:.3f}",
-                        'Precision': f"{result['precision']:.3f}",
-                        'Recall': f"{result['recall']:.3f}",
-                        'AUC': f"{result['auc_score']:.3f}" if result['auc_score'] else "N/A"
-                    })
-                
-                results_df = pd.DataFrame(results_data)
-                st.dataframe(results_df, use_container_width=True)
-                
-                # Show best performing model
-                if results_data:
-                    best_f1_model = max(st.session_state.model_results.values(), key=lambda x: x['f1_score'])
-                    st.success(f"🏆 Best F1-Score: {best_f1_model['name']} ({best_f1_model['f1_score']:.3f})")
-            else:
-                st.warning("⚠️ No models were successfully trained.")
-        
-        elif not st.session_state.models_trained:
-            st.info("👈 Configure your models and click 'Train Models' to see results here.")
-            
-            # Show data preview
-            if not df.empty:
-                st.subheader("Processed Data Preview")
-                st.dataframe(df.head(), use_container_width=True)
-
-# TAB 4: Performance Center (unchanged from original)
-with tab4:
-    st.header("📈 Performance Center")
-    
-    if not st.session_state.model_results:
-        st.warning("⚠️ No models trained yet. Please go to the Model Lab tab to train some models first.")
-    else:
-        # Model comparison metrics
-        st.subheader("📊 Model Comparison Dashboard")
-        
-        valid_results = {k: v for k, v in st.session_state.model_results.items() if v is not None}
-        
-        if not valid_results:
-            st.error("❌ No valid model results found. Please retrain your models.")
-        else:
-            col1, col2, col3, col4 = st.columns(4)
-            
-            # Best model metrics
-            try:
-                best_f1 = max(valid_results.values(), key=lambda x: x['f1_score'])
-                best_acc = max(valid_results.values(), key=lambda x: x['accuracy'])
-                best_precision = max(valid_results.values(), key=lambda x: x['precision'])
-                best_recall = max(valid_results.values(), key=lambda x: x['recall'])
-                
-                with col1:
-                    st.metric("🎯 Best F1-Score", f"{best_f1['f1_score']:.3f}", 
-                             help=f"Model: {best_f1['name']}")
-                with col2:
-                    st.metric("🎯 Best Precision", f"{best_precision['precision']:.3f}",
-                             help=f"Model: {best_precision['name']}")
-                with col3:
-                    st.metric("🎯 Best Recall", f"{best_recall['recall']:.3f}",
-                             help=f"Model: {best_recall['name']}")
-                with col4:
-                    st.metric("📊 Models Trained", len(valid_results))
-            except Exception as e:
-                st.error(f"Error calculating best metrics: {str(e)}")
-            
-            # Performance comparison charts
-            st.subheader("📈 Performance Comparison")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # ROC Curves
-                try:
-                    models_with_proba = {k: v for k, v in valid_results.items() if v['probabilities'] is not None}
-                    if models_with_proba:
-                        fig_roc = create_roc_curve(models_with_proba)
-                        st.plotly_chart(fig_roc, use_container_width=True)
-                    else:
-                        st.info("📊 ROC curves require models with probability predictions.")
-                except Exception as e:
-                    st.error(f"Error creating ROC curves: {str(e)}")
-            
-            with col2:
-                # Performance metrics comparison
-                try:
-                    metrics_data = []
-                    for result in valid_results.values():
-                        metrics_data.append({
-                            'Model': result['name'][:20] + "..." if len(result['name']) > 20 else result['name'],
-                            'Accuracy': result['accuracy'],
-                            'F1-Score': result['f1_score'],
-                            'Precision': result['precision'],
-                            'Recall': result['recall']
-                        })
-                    
-                    if metrics_data:
-                        metrics_df = pd.DataFrame(metrics_data)
-                        fig_metrics = px.bar(
-                            metrics_df.melt(id_vars='Model', var_name='Metric', value_name='Score'),
-                            x='Model', y='Score', color='Metric',
-                            title="Performance Metrics Comparison",
-                            barmode='group'
-                        )
-                        fig_metrics.update_xaxes(tickangle=45)
-                        fig_metrics.update_layout(height=400)
-                        st.plotly_chart(fig_metrics, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Error creating metrics comparison: {str(e)}")
-            
-            # Individual model analysis
-            st.subheader("🔍 Individual Model Analysis")
-            
-            model_names = list(valid_results.keys())
-            selected_model_name = st.selectbox(
-                "Select Model for Detailed Analysis",
-                model_names,
-                key="model_analysis_selector"
-            )
-            
-            if selected_model_name and selected_model_name in valid_results:
-                selected_result = valid_results[selected_model_name]
-                
-                # Model details
-                with st.expander(f"📋 {selected_result['name']} - Model Details", expanded=True):
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.metric("Accuracy", f"{selected_result['accuracy']:.3f}")
-                        st.metric("Precision", f"{selected_result['precision']:.3f}")
-                    
-                    with col2:
-                        st.metric("Recall", f"{selected_result['recall']:.3f}")
-                        st.metric("F1-Score", f"{selected_result['f1_score']:.3f}")
-                    
-                    with col3:
-                        if selected_result['auc_score']:
-                            st.metric("AUC Score", f"{selected_result['auc_score']:.3f}")
-                
-                # Confusion Matrix
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    cm_fig = create_confusion_matrix_plot(
-                        selected_result['confusion_matrix'], 
-                        selected_result['name']
-                    )
-                    st.plotly_chart(cm_fig, use_container_width=True)
-                
-                with col2:
-                    # Feature importance if available
-                    if hasattr(selected_result['model'], 'feature_importances_') or hasattr(selected_result['model'], 'coef_'):
-                        if 'selected_features' in locals():
-                            fi_fig = create_feature_importance_plot(selected_result, selected_features)
-                            if fi_fig:
-                                st.plotly_chart(fi_fig, use_container_width=True)
-                    else:
-                        st.info("Feature importance not available for this model type.")
-                
-                # Classification Report
-                with st.expander("📊 Detailed Classification Report"):
-                    try:
-                        if 'classification_report' in selected_result:
-                            report_df = pd.DataFrame(selected_result['classification_report']).transpose()
-                            
-                            # Format numeric columns
-                            for col in ['precision', 'recall', 'f1-score']:
-                                if col in report_df.columns:
-                                    report_df[col] = report_df[col].apply(
-                                        lambda x: f"{x:.3f}" if isinstance(x, (int, float)) else str(x)
-                                    )
-                            st.dataframe(report_df, use_container_width=True)
-                        else:
-                            st.warning("Classification report not available")
-                    except Exception as e:
-                        st.error(f"Error displaying classification report: {str(e)}")
-                
-                # AutoML specific information
-                if 'automl_params' in selected_result:
-                    with st.expander("🚀 AutoML Optimization Results"):
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.subheader("Best Parameters:")
-                            for param, value in selected_result['automl_params'].items():
-                                st.text(f"• {param}: {value}")
-                        
-                        with col2:
-                            st.subheader("Optimization Details:")
-                            st.metric("Best Score", f"{selected_result['automl_best_score']:.3f}")
-                            if 'n_trials' in locals():
-                                st.metric("Trials Run", f"{n_trials}")
-                            if 'automl_metric' in locals():
-                                st.text(f"• Optimized for: {automl_metric.upper()}")
-
-# Footer
-st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align: center; padding: 20px;'>
-        <h4>🚀 ENB Stock Analysis & Prediction Dashboard</h4>
-        <p><strong>Features:</strong> Comprehensive EDA • Investment Insights • Technical Analysis • ML Predictions</p>
-        <p><strong>Built with:</strong> Streamlit • Scikit-learn • Plotly • Optuna</p>
-        <p><em>Made by Ahmed Awad</em></p>
-    </div>
-    """, 
-    unsafe_allow_html=True
-)
